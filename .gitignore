@@ -1,6 +1,9 @@
 # Prerequisites
 *.d
 
+# OS-generated files
+.DS_Store
+
 # Object files
 *.o
 *.ko
@@ -60,7 +63,6 @@ stage/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
-*.cmake
 compile_commands.json
 
 # Visual Studio
