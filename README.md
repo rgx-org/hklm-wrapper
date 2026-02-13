@@ -24,17 +24,30 @@ This project uses CMake + vcpkg for SQLite3.
 
 ### Native Windows build
 
-For a 32-bit native Windows build (Win32), use the preset flow:
+For a 32-bit native Windows build (Win32), use the helper scripts from **any terminal** (cmd, PowerShell, Git Bash, etc.).
 
-1) Install vcpkg and set `VCPKG_ROOT`.
+1) Install vcpkg and set `VCPKG_ROOT` (optional if it lives at `%USERPROFILE%\\vcpkg`).
 
 2) Configure + build:
+
+`scripts\\cmake-msvc-x86.cmd --preset windows-x86-msvc-release`
+
+`scripts\\cmake-msvc-x86.cmd --build --preset windows-x86-msvc-release`
+
+Artifacts are emitted under `build/windows-x86-msvc-release/Release`.
+
+If you want a stable runtime output directory (`stage/bin`), use:
+
+`scripts\\build-windows-msvc-x86.cmd`
+
+The helper scripts auto-detect Visual Studio via `vswhere`, call `VsDevCmd.bat` (`-arch=x86`), then invoke CMake.
+If `vswhere` is unavailable or fails, they fall back to Visual Studio metadata under `C:\ProgramData\Microsoft\VisualStudio`.
+
+Optional: direct preset flow (requires VS developer shell)
 
 `cmake --preset windows-x86-msvc-release`
 
 `cmake --build --preset windows-x86-msvc-release`
-
-Artifacts are emitted under `build/windows-x86-msvc-release/Release`.
 
 If you want a stable runtime output directory (`stage/bin`), use the 3-command staging flow:
 
@@ -44,11 +57,28 @@ If you want a stable runtime output directory (`stage/bin`), use the 3-command s
 
 `cmake --build --preset windows-x86-msvc-release-stage-install`
 
+Git Bash note: if direct `.cmd` invocation is blocked by shell policy, run via `cmd.exe`:
+
+`cmd.exe /d /c scripts\\cmake-msvc-x86.cmd --preset windows-x86-msvc-release`
+
 Expected output path:
 
 - `stage/bin/hklm_wrapper.exe`
 - `stage/bin/hklm_shim.dll`
 - `stage/bin/hklmreg.exe`
+
+#### Troubleshooting: `could not find any instance of Visual Studio`
+
+This typically happens when CMake presets are tied to a specific Visual Studio generator version.
+
+This repository’s MSVC preset now uses `Ninja Multi-Config` + `cl.exe` instead of a hard-coded Visual Studio generator, which avoids version-mismatch failures (for example VS 2026 installed but preset requests VS 2022).
+
+If you still hit toolchain errors:
+
+- Ensure C++ build tools are installed in Visual Studio (`Desktop development with C++`).
+- Use `scripts\\cmake-msvc-x86.cmd` (or `scripts\\build-windows-msvc-x86.cmd`) so VS env is initialized automatically.
+- The helper scripts try `vswhere` first, then `C:\ProgramData\Microsoft\VisualStudio` metadata as a fallback.
+- Confirm `VCPKG_ROOT` points to a valid vcpkg clone.
 
 ### Cross-compile from macOS/Linux to Win32 (x86)
 
@@ -112,14 +142,6 @@ Optional presets:
 The repository includes a CTest/Catch2 unit test setup under `tests/`.
 
 Native host test run (macOS/Linux/Windows):
-
-`cmake -S . -B build-tests -G Ninja`
-
-`cmake --build build-tests`
-
-`ctest --test-dir build-tests --output-on-failure`
-
-Preset-based test run:
 
 `cmake --preset native-tests`
 

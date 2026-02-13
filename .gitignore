@@ -59,6 +59,7 @@ dkms.conf
 
 # CMake / build
 build/
+build-tests/
 stage/
 cmake-build-*/
 CMakeFiles/
