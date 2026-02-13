@@ -6,6 +6,7 @@ namespace hklmwrap {
 
 bool InjectDllIntoProcess(HANDLE processHandle, const std::wstring& dllPath) {
   if (!processHandle || dllPath.empty()) {
+    SetLastError(ERROR_INVALID_PARAMETER);
     return false;
   }
 
@@ -38,12 +39,30 @@ bool InjectDllIntoProcess(HANDLE processHandle, const std::wstring& dllPath) {
     return false;
   }
 
-  WaitForSingleObject(thread, INFINITE);
+  const DWORD waitResult = WaitForSingleObject(thread, 15000);
+  if (waitResult != WAIT_OBJECT_0) {
+    CloseHandle(thread);
+    VirtualFreeEx(processHandle, remote, 0, MEM_RELEASE);
+    if (waitResult == WAIT_TIMEOUT) {
+      SetLastError(ERROR_TIMEOUT);
+    }
+    return false;
+  }
+
   DWORD exitCode = 0;
-  GetExitCodeThread(thread, &exitCode);
+  if (!GetExitCodeThread(thread, &exitCode)) {
+    CloseHandle(thread);
+    VirtualFreeEx(processHandle, remote, 0, MEM_RELEASE);
+    return false;
+  }
+
   CloseHandle(thread);
   VirtualFreeEx(processHandle, remote, 0, MEM_RELEASE);
-  return exitCode != 0;
+  if (exitCode == 0) {
+    SetLastError(ERROR_DLL_INIT_FAILED);
+    return false;
+  }
+  return true;
 }
 
 }

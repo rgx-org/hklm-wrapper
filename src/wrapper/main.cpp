@@ -35,6 +35,19 @@ static void ShowInfo(const std::wstring& message) {
 #endif
 }
 
+static void TraceLine(const std::wstring& message, bool enabled) {
+#if defined(HKLM_WRAPPER_CONSOLE_APP)
+  if (!enabled) {
+    return;
+  }
+  fwprintf(stdout, L"[hklm_wrapper] %ls\n", message.c_str());
+  fflush(stdout);
+#else
+  (void)message;
+  (void)enabled;
+#endif
+}
+
 static bool TryQueryWow64(HANDLE process, BOOL* isWow64) {
   if (!isWow64) {
     return false;
@@ -356,6 +369,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     return parseResult;
   }
 
+  const bool traceEnabled = !debugApisCsv.empty();
+
   const std::wstring wrapperDir = GetDirectoryName(GetModulePath());
   const std::wstring targetStem = GetFileStem(targetExe);
   const std::wstring dbPath = CombinePath(wrapperDir, targetStem + L"-HKLM.sqlite");
@@ -369,11 +384,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
       ShowError(L"Failed to bind stdout to console for --debug mode.");
       return 4;
     }
+    TraceLine(L"debug mode enabled", traceEnabled);
     if (!debugBridge.Start()) {
       std::wstring msg = L"Failed to create debug pipe: " + FormatWin32Error(GetLastError());
       ShowError(msg);
       return 5;
     }
+    TraceLine(L"debug pipe created: " + debugBridge.pipeName, traceEnabled);
     SetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_APIS", debugApisCsv.c_str());
     SetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", debugBridge.pipeName.c_str());
   }
@@ -386,6 +403,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
   std::wstring mutableCmd = cmdLine;
   std::wstring workDir = DefaultWorkingDirForTarget(targetExe);
+
+  TraceLine(L"launching target: " + targetExe, traceEnabled);
+  if (!workDir.empty()) {
+    TraceLine(L"working directory: " + workDir, traceEnabled);
+  }
 
 #if HKLM_WRAPPER_IGNORE_EMBEDDED_MANIFEST
   CompatLayerGuard compatLayerGuard;
@@ -416,6 +438,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     return (int)err;
   }
 
+  TraceLine(L"CreateProcessW succeeded", traceEnabled);
+
   if (IsProcessBitnessMismatched(pi.hProcess)) {
     TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hThread);
@@ -424,13 +448,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     return 6;
   }
 
+  TraceLine(L"injecting shim: " + shimPath, traceEnabled);
+
   if (!InjectDllIntoProcess(pi.hProcess, shimPath)) {
+    DWORD injectErr = GetLastError();
     TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    ShowError(L"Failed to inject hklm_shim.dll into target process");
+    std::wstring msg = L"Failed to inject hklm_shim.dll into target process: " + FormatWin32Error(injectErr);
+    ShowError(msg);
     return 2;
   }
+
+  TraceLine(L"shim injected successfully", traceEnabled);
 
   HANDLE debugJob = nullptr;
   bool trackWithDebugJob = false;
@@ -443,6 +473,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   }
 
   ResumeThread(pi.hThread);
+  TraceLine(L"target resumed", traceEnabled);
   CloseHandle(pi.hThread);
 
   if (trackWithDebugJob) {
