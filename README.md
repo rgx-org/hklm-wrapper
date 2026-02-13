@@ -22,6 +22,15 @@ Edit [config/wrapper_config.h](config/wrapper_config.h) as needed:
 
 This project uses CMake + vcpkg for SQLite3.
 
+### SQLite3 dependency behavior (important)
+
+- `vcpkg.json` already declares `sqlite3`, so you usually do **not** install SQLite manually.
+- SQLite is auto-provisioned only when CMake is configured with the vcpkg toolchain (`vcpkg.cmake`, directly or via this repo's wrapper toolchain).
+- If you configure without that toolchain, CMake will fail with `SQLite3 not found`.
+- If auto-provisioning does not occur for your environment, install explicitly:
+
+`%VCPKG_ROOT%\\vcpkg install sqlite3:x86-windows`
+
 ### Native Windows build
 
 For a 32-bit native Windows build (Win32), use the helper scripts from **any terminal** (cmd, PowerShell, Git Bash, etc.).
@@ -141,13 +150,28 @@ Optional presets:
 
 The repository includes a CTest/Catch2 unit test setup under `tests/`.
 
-Native host test run (macOS/Linux/Windows):
+Native host test run (macOS/Linux):
 
 `cmake --preset native-tests`
 
 `cmake --build --preset native-tests`
 
 `ctest --preset native-tests`
+
+Windows (PowerShell/cmd, recommended):
+
+`scripts\\cmake-msvc-x86.cmd --preset native-tests-windows`
+
+`scripts\\cmake-msvc-x86.cmd --build --preset native-tests-windows`
+
+`ctest --preset native-tests-windows`
+
+Windows note:
+
+- The `native-tests` preset uses the `Ninja` generator and does not force vcpkg toolchain integration.
+- The `native-tests-windows` preset wires vcpkg (`x86-windows`) so SQLite3 can be resolved from `vcpkg.json`.
+- If you run `cmake --preset native-tests` directly, ensure both `ninja` and a working C/C++ toolchain are on `PATH`, and pass a vcpkg toolchain if you need SQLite-backed tests.
+- The helper script initializes the MSVC developer environment automatically, which resolves missing compiler errors.
 
 Notes:
 

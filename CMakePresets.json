@@ -103,6 +103,22 @@
         "HKLM_WRAPPER_ENABLE_TESTS": "ON",
         "BUILD_TESTING": "ON"
       }
+    },
+    {
+      "name": "native-tests-windows",
+      "displayName": "Native host unit tests (Windows + vcpkg)",
+      "description": "Configure native Windows test build with vcpkg-provided SQLite3.",
+      "inherits": "native-tests",
+      "binaryDir": "${sourceDir}/build/native-tests-windows",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/vcpkg-env-or-home.cmake",
+        "VCPKG_TARGET_TRIPLET": "x86-windows"
+      }
     }
   ],
   "buildPresets": [
@@ -156,12 +172,24 @@
       "name": "native-tests",
       "configurePreset": "native-tests",
       "configuration": "Debug"
+    },
+    {
+      "name": "native-tests-windows",
+      "configurePreset": "native-tests-windows",
+      "configuration": "Debug"
     }
   ],
   "testPresets": [
     {
       "name": "native-tests",
       "configurePreset": "native-tests",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "native-tests-windows",
+      "configurePreset": "native-tests-windows",
       "output": {
         "outputOnFailure": true
       }
