@@ -31,6 +31,34 @@ std::wstring GetModuleFilePath() {
   return path;
 }
 
+std::filesystem::path MakeTempWorkflowDir() {
+  std::error_code ec;
+  const std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+  if (ec || base.empty()) {
+    return {};
+  }
+
+  const std::wstring suffix =
+      L"hklm-wrapper-workflow-" + std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId())) + L"-" +
+      std::to_wstring(static_cast<unsigned long>(GetTickCount64()));
+
+  const std::filesystem::path dir = base / std::filesystem::path(suffix);
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    return {};
+  }
+  return dir;
+}
+
+bool CopyRuntimeArtifact(const std::filesystem::path& source, const std::filesystem::path& destinationDir) {
+  std::error_code ec;
+  std::filesystem::copy_file(source,
+                             destinationDir / source.filename(),
+                             std::filesystem::copy_options::overwrite_existing,
+                             ec);
+  return !ec;
+}
+
 std::optional<ChildRunResult> RunWithCapturedOutput(const std::wstring& exePath,
                                                     const std::vector<std::wstring>& args,
                                                     const std::wstring& workingDir) {
@@ -123,11 +151,23 @@ TEST_CASE("wrapper debug mode covers injected hook and store data flow", "[shim]
   const std::filesystem::path buildDir = testsDir.parent_path();
 
   const std::filesystem::path wrapperPath = buildDir / "hklm_wrapper_cli.exe";
+  const std::filesystem::path shimPath = buildDir / "hklm_shim.dll";
   const std::filesystem::path probePath = testsDir / "hklm_workflow_probe.exe";
-  const std::filesystem::path dbPath = buildDir / "hklm_workflow_probe-HKLM.sqlite";
 
   REQUIRE(std::filesystem::exists(wrapperPath));
+  REQUIRE(std::filesystem::exists(shimPath));
   REQUIRE(std::filesystem::exists(probePath));
+
+  const std::filesystem::path isolatedDir = MakeTempWorkflowDir();
+  REQUIRE_FALSE(isolatedDir.empty());
+
+  REQUIRE(CopyRuntimeArtifact(wrapperPath, isolatedDir));
+  REQUIRE(CopyRuntimeArtifact(shimPath, isolatedDir));
+  REQUIRE(CopyRuntimeArtifact(probePath, isolatedDir));
+
+  const std::filesystem::path isolatedWrapperPath = isolatedDir / wrapperPath.filename();
+  const std::filesystem::path isolatedProbePath = isolatedDir / probePath.filename();
+  const std::filesystem::path dbPath = isolatedDir / "hklm_workflow_probe-HKLM.sqlite";
 
   std::error_code removeEc;
   std::filesystem::remove(dbPath, removeEc);
@@ -136,9 +176,9 @@ TEST_CASE("wrapper debug mode covers injected hook and store data flow", "[shim]
       L"e2e-" + std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId())) + L"-" +
       std::to_wstring(static_cast<unsigned long>(GetTickCount64()));
 
-  const auto run = RunWithCapturedOutput(wrapperPath.wstring(),
-                                         {L"--debug", L"all", probePath.wstring(), suffix},
-                                         buildDir.wstring());
+  const auto run = RunWithCapturedOutput(isolatedWrapperPath.wstring(),
+                                         {L"--debug", L"all", isolatedProbePath.wstring(), suffix},
+                                         isolatedDir.wstring());
 
   REQUIRE(run.has_value());
   REQUIRE(run->exitCode == 0);
@@ -161,4 +201,7 @@ TEST_CASE("wrapper debug mode covers injected hook and store data flow", "[shim]
   REQUIRE_FALSE(stored->isDeleted);
   CHECK(stored->type == REG_SZ);
   CHECK(ReadRegSzText(*stored) == L"wrapped-ok");
+
+  std::error_code cleanupEc;
+  std::filesystem::remove_all(isolatedDir, cleanupEc);
 }
