@@ -96,6 +96,7 @@ Optional presets:
 
 - Put `hklm_wrapper.exe` and `hklm_shim.dll` next to each other.
 - Run `hklm_wrapper.exe <target_exe> [target arguments...]`.
+- Optional debug tracing: `hklm_wrapper.exe --debug <api1,api2,...|all> <target_exe> [target arguments...]`.
 - By default, the wrapper launches targets with `RunAsInvoker` compatibility so embedded elevation manifests are ignored.
 
 Examples:
@@ -103,6 +104,13 @@ Examples:
 `hklm_wrapper.exe C:\\Path\\To\\TargetApp.exe`
 
 `hklm_wrapper.exe C:\\Path\\To\\TargetApp.exe --mode test --config "C:\\path with spaces\\cfg.json"`
+
+`hklm_wrapper.exe --debug RegOpenKey,RegQueryValue C:\\Path\\To\\TargetApp.exe`
+
+`hklm_wrapper.exe --debug all C:\\Path\\To\\TargetApp.exe`
+
+`--debug` prints a line to stdout each time a selected hooked API is called in the target process.
+For base names, non-`Ex` and `Ex` are both matched (for example `RegQueryValue` matches `RegQueryValue` and `RegQueryValueEx`; `RegOpenKey` matches `RegOpenKey` and `RegOpenKeyEx`).
 
 ## hklmreg examples
 
@@ -238,5 +246,6 @@ WHERE key_path='HKLM\\Software\\MyApp'
   - Enumerate/query metadata: `RegEnumValue`, `RegEnumKey(Ex)`, `RegQueryInfoKey`
 - No ACL/security descriptor handling.
 - Hooks both wide and ANSI variants for the functions above (`*W` and `*A`).
+- In `--debug` mode, tracing stays active for the full target process lifetime (wrapper waits for target exit).
 - Wrapper + shim must match the target bitness (x86 target needs x86 wrapper+DLL; x64 target needs x64 wrapper+DLL).
 - Cross-compiling on macOS/Linux only builds Windows binaries; run/test them on Windows (or under Wine).

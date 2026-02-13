@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 #include <cwctype>
+#include <cstdio>
+#include <thread>
 
 using namespace hklmwrap;
 
@@ -31,13 +33,16 @@ static std::vector<std::wstring> GetRawArgs() {
 
 static std::wstring BuildUsageMessage() {
   return L"Usage:\n"
-         L"  hklm_wrapper.exe <target_exe> [target arguments...]\n\n"
+         L"  hklm_wrapper.exe [--debug <api1,api2,...|all>] <target_exe> [target arguments...]\n\n"
          L"Examples:\n"
          L"  hklm_wrapper.exe C:\\Apps\\TargetApp.exe\n"
+         L"  hklm_wrapper.exe --debug RegOpenKey,RegQueryValue C:\\Apps\\TargetApp.exe\n"
          L"  hklm_wrapper.exe C:\\Apps\\TargetApp.exe --mode test --config \"C:\\path with spaces\\cfg.json\"";
 }
 
-static int ParseLaunchArguments(std::wstring& targetExe, std::vector<std::wstring>& forwardedArgs) {
+static int ParseLaunchArguments(std::wstring& targetExe,
+                                std::vector<std::wstring>& forwardedArgs,
+                                std::wstring& debugApisCsv) {
   const std::vector<std::wstring> rawArgs = GetRawArgs();
   if (rawArgs.empty()) {
     MessageBoxW(nullptr, BuildUsageMessage().c_str(), L"hklm_wrapper", MB_ICONERROR);
@@ -49,10 +54,110 @@ static int ParseLaunchArguments(std::wstring& targetExe, std::vector<std::wstrin
     return 0;
   }
 
-  targetExe = rawArgs[0];
-  forwardedArgs.assign(rawArgs.begin() + 1, rawArgs.end());
+  size_t i = 0;
+  while (i < rawArgs.size()) {
+    if (rawArgs[i] == L"--debug") {
+      if (i + 1 >= rawArgs.size()) {
+        MessageBoxW(nullptr,
+                    L"Missing value for --debug. Expected comma-separated API list or all.",
+                    L"hklm_wrapper",
+                    MB_ICONERROR);
+        return 1;
+      }
+      debugApisCsv = rawArgs[i + 1];
+      i += 2;
+      continue;
+    }
+    break;
+  }
+
+  if (i >= rawArgs.size()) {
+    MessageBoxW(nullptr, BuildUsageMessage().c_str(), L"hklm_wrapper", MB_ICONERROR);
+    return 1;
+  }
+
+  targetExe = rawArgs[i];
+  forwardedArgs.assign(rawArgs.begin() + i + 1, rawArgs.end());
   return -1;
 }
+
+static bool EnsureStdoutBoundToConsole() {
+  if (!AttachConsole(ATTACH_PARENT_PROCESS) && GetLastError() != ERROR_ACCESS_DENIED) {
+    if (!AllocConsole()) {
+      return false;
+    }
+  }
+
+  FILE* out = nullptr;
+  FILE* err = nullptr;
+  if (freopen_s(&out, "CONOUT$", "w", stdout) != 0) {
+    return false;
+  }
+  if (freopen_s(&err, "CONOUT$", "w", stderr) != 0) {
+    return false;
+  }
+  setvbuf(stdout, nullptr, _IONBF, 0);
+  setvbuf(stderr, nullptr, _IONBF, 0);
+  return true;
+}
+
+struct DebugPipeBridge {
+  HANDLE pipe = INVALID_HANDLE_VALUE;
+  std::thread reader;
+  std::wstring pipeName;
+
+  bool Start() {
+    wchar_t pipePath[256]{};
+    swprintf_s(pipePath, L"\\\\.\\pipe\\hklm_wrapper_debug_%lu", GetCurrentProcessId());
+    pipeName = pipePath;
+
+    pipe = CreateNamedPipeW(pipeName.c_str(),
+                            PIPE_ACCESS_INBOUND,
+                            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                            1,
+                            4096,
+                            4096,
+                            0,
+                            nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) {
+      return false;
+    }
+
+    reader = std::thread([this] {
+      BOOL connected = ConnectNamedPipe(pipe, nullptr);
+      if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
+        return;
+      }
+
+      char buffer[1024];
+      while (true) {
+        DWORD bytesRead = 0;
+        if (!ReadFile(pipe, buffer, (DWORD)sizeof(buffer), &bytesRead, nullptr) || bytesRead == 0) {
+          break;
+        }
+        fwrite(buffer, 1, bytesRead, stdout);
+        fflush(stdout);
+      }
+    });
+    return true;
+  }
+
+  void Stop() {
+    if (pipe != INVALID_HANDLE_VALUE) {
+      FlushFileBuffers(pipe);
+      DisconnectNamedPipe(pipe);
+      CloseHandle(pipe);
+      pipe = INVALID_HANDLE_VALUE;
+    }
+    if (reader.joinable()) {
+      reader.join();
+    }
+  }
+
+  ~DebugPipeBridge() {
+    Stop();
+  }
+};
 
 static std::wstring DefaultWorkingDirForTarget(const std::wstring& targetExe) {
   if (std::wstring(HKLM_WRAPPER_WORKING_DIR).empty()) {
@@ -140,7 +245,8 @@ struct CompatLayerGuard {
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   std::wstring targetExe;
   std::vector<std::wstring> args;
-  int parseResult = ParseLaunchArguments(targetExe, args);
+  std::wstring debugApisCsv;
+  int parseResult = ParseLaunchArguments(targetExe, args, debugApisCsv);
   if (parseResult >= 0) {
     return parseResult;
   }
@@ -151,6 +257,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
   const std::wstring shimPath = CombinePath(wrapperDir, HKLM_WRAPPER_SHIM_DLL_NAME);
   SetEnvironmentVariableW(L"HKLM_WRAPPER_DB_PATH", dbPath.c_str());
+
+  DebugPipeBridge debugBridge;
+  if (!debugApisCsv.empty()) {
+    if (!EnsureStdoutBoundToConsole()) {
+      MessageBoxW(nullptr, L"Failed to bind stdout to console for --debug mode.", L"hklm_wrapper", MB_ICONERROR);
+      return 4;
+    }
+    if (!debugBridge.Start()) {
+      std::wstring msg = L"Failed to create debug pipe: " + FormatWin32Error(GetLastError());
+      MessageBoxW(nullptr, msg.c_str(), L"hklm_wrapper", MB_ICONERROR);
+      return 5;
+    }
+    SetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_APIS", debugApisCsv.c_str());
+    SetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", debugBridge.pipeName.c_str());
+  }
 
   std::wstring cmdLine = BuildCommandLine(targetExe, args);
 
@@ -202,6 +323,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   CloseHandle(pi.hThread);
 
   WaitForSingleObject(pi.hProcess, INFINITE);
+  debugBridge.Stop();
   DWORD exitCode = 0;
   GetExitCodeProcess(pi.hProcess, &exitCode);
   CloseHandle(pi.hProcess);
