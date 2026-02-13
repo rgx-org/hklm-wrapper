@@ -4,7 +4,8 @@ Win32 wrapper that launches a target EXE, injects `hklm_shim.dll`, and virtualiz
 
 ## Binaries
 
-- `hklm_wrapper.exe`: launcher/injector.
+- `hklm_wrapper.exe`: GUI launcher/injector (no console window when launched from GUI tools).
+- `hklm_wrapper_cli.exe`: console launcher/injector (recommended for `--debug` from cmd/PowerShell).
 - `hklm_shim.dll`: hooked registry layer.
 - `hklmreg.exe`: CLI for local DB add/delete/export/import.
 
@@ -62,6 +63,7 @@ cmake --build --preset windows-x86-mingw-release-stage-install
 
 Expected runtime artifacts in `stage/bin`:
 - `hklm_wrapper.exe`
+- `hklm_wrapper_cli.exe`
 - `hklm_shim.dll`
 - `hklmreg.exe`
 
@@ -102,14 +104,18 @@ ctest --preset native-tests-windows
 
 ```text
 hklm_wrapper.exe [--debug <api-list|all>] <target_exe> [target args...]
+hklm_wrapper_cli.exe [--debug <api-list|all>] <target_exe> [target args...]
 ```
+
+Use `hklm_wrapper.exe` for normal GUI-driven launches.
+Use `hklm_wrapper_cli.exe` when launching from cmd/PowerShell, especially with `--debug`, so the shell blocks until the wrapped process finishes.
 
 Examples:
 
 ```text
 hklm_wrapper.exe C:\Path\To\TargetApp.exe
-hklm_wrapper.exe --debug RegOpenKey,RegQueryValue C:\Path\To\TargetApp.exe
-hklm_wrapper.exe --debug all C:\Path\To\TargetApp.exe
+hklm_wrapper_cli.exe --debug RegOpenKey,RegQueryValue C:\Path\To\TargetApp.exe
+hklm_wrapper_cli.exe --debug all C:\Path\To\TargetApp.exe
 ```
 
 ## hklmreg quick examples

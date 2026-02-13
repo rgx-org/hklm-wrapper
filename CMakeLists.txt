@@ -143,6 +143,17 @@ else()
   target_link_libraries(hklm_wrapper PRIVATE hklm_common)
   target_compile_definitions(hklm_wrapper PRIVATE UNICODE _UNICODE NOMINMAX)
 
+  add_executable(hklm_wrapper_cli
+    src/wrapper/main.cpp
+    src/wrapper/process_inject.cpp
+    src/wrapper/process_inject.h
+  )
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_options(hklm_wrapper_cli PRIVATE -municode)
+  endif()
+  target_link_libraries(hklm_wrapper_cli PRIVATE hklm_common)
+  target_compile_definitions(hklm_wrapper_cli PRIVATE UNICODE _UNICODE NOMINMAX HKLM_WRAPPER_CONSOLE_APP)
+
   add_executable(hklmreg
     src/hklmreg/main.cpp
   )
@@ -154,6 +165,7 @@ else()
 
   install(TARGETS
     hklm_wrapper
+    hklm_wrapper_cli
     hklm_shim
     hklmreg
     RUNTIME DESTINATION bin

@@ -78,3 +78,41 @@ if(NOT _sqlite_target STREQUAL "")
 else()
   message(STATUS "SQLite3 not found: skipping hklm_store_tests")
 endif()
+
+if(WIN32)
+  add_executable(hklm_shim_utils_tests
+    test_registry_hooks_utils.cpp
+    ../src/shim/registry_hooks_utils.cpp
+  )
+
+  target_include_directories(hklm_shim_utils_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  )
+
+  target_link_libraries(hklm_shim_utils_tests PRIVATE Catch2::Catch2WithMain)
+  target_compile_definitions(hklm_shim_utils_tests PRIVATE UNICODE _UNICODE NOMINMAX)
+
+  catch_discover_tests(hklm_shim_utils_tests DISCOVERY_MODE PRE_TEST)
+
+  if(NOT _sqlite_target STREQUAL "")
+    add_executable(hklm_shim_integration_tests
+      test_registry_hooks_integration.cpp
+      ../src/common/local_registry_store.cpp
+      ../src/common/utf8.cpp
+      ../src/shim/registry_hooks_utils.cpp
+    )
+
+    target_include_directories(hklm_shim_integration_tests PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/..
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    )
+
+    target_link_libraries(hklm_shim_integration_tests PRIVATE Catch2::Catch2WithMain ${_sqlite_target})
+    target_compile_definitions(hklm_shim_integration_tests PRIVATE UNICODE _UNICODE NOMINMAX)
+
+    catch_discover_tests(hklm_shim_integration_tests DISCOVERY_MODE PRE_TEST)
+  else()
+    message(STATUS "SQLite3 not found: skipping hklm_shim_integration_tests")
+  endif()
+endif()

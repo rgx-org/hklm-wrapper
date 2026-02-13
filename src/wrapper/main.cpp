@@ -31,13 +31,22 @@ static std::vector<std::wstring> GetRawArgs() {
   return out;
 }
 
+static const wchar_t* GetWrapperExeNameForUsage() {
+#if defined(HKLM_WRAPPER_CONSOLE_APP)
+  return L"hklm_wrapper_cli.exe";
+#else
+  return L"hklm_wrapper.exe";
+#endif
+}
+
 static std::wstring BuildUsageMessage() {
+  const std::wstring exe = GetWrapperExeNameForUsage();
   return L"Usage:\n"
-         L"  hklm_wrapper.exe [--debug <api1,api2,...|all>] <target_exe> [target arguments...]\n\n"
+         L"  " + exe + L" [--debug <api1,api2,...|all>] <target_exe> [target arguments...]\n\n"
          L"Examples:\n"
-         L"  hklm_wrapper.exe C:\\Apps\\TargetApp.exe\n"
-         L"  hklm_wrapper.exe --debug RegOpenKey,RegQueryValue C:\\Apps\\TargetApp.exe\n"
-         L"  hklm_wrapper.exe C:\\Apps\\TargetApp.exe --mode test --config \"C:\\path with spaces\\cfg.json\"";
+         L"  " + exe + L" C:\\Apps\\TargetApp.exe\n"
+         L"  " + exe + L" --debug RegOpenKey,RegQueryValue C:\\Apps\\TargetApp.exe\n"
+         L"  " + exe + L" C:\\Apps\\TargetApp.exe --mode test --config \"C:\\path with spaces\\cfg.json\"";
 }
 
 static int ParseLaunchArguments(std::wstring& targetExe,
@@ -99,6 +108,39 @@ static bool EnsureStdoutBoundToConsole() {
   setvbuf(stdout, nullptr, _IONBF, 0);
   setvbuf(stderr, nullptr, _IONBF, 0);
   return true;
+}
+
+static HANDLE CreateProcessTrackingJob() {
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  if (!job) {
+    return nullptr;
+  }
+
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+    CloseHandle(job);
+    return nullptr;
+  }
+
+  return job;
+}
+
+static bool WaitForJobToDrain(HANDLE job) {
+  if (!job) {
+    return false;
+  }
+
+  while (true) {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
+    if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr)) {
+      return false;
+    }
+    if (info.ActiveProcesses == 0) {
+      return true;
+    }
+    Sleep(50);
+  }
 }
 
 struct DebugPipeBridge {
@@ -242,7 +284,11 @@ struct CompatLayerGuard {
   }
 };
 
+#if defined(HKLM_WRAPPER_CONSOLE_APP)
+int wmain() {
+#else
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+#endif
   std::wstring targetExe;
   std::vector<std::wstring> args;
   std::wstring debugApisCsv;
@@ -319,10 +365,32 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     return 2;
   }
 
+  HANDLE debugJob = nullptr;
+  bool trackWithDebugJob = false;
+  bool waitedForJob = false;
+  if (!debugApisCsv.empty()) {
+    debugJob = CreateProcessTrackingJob();
+    if (debugJob && AssignProcessToJobObject(debugJob, pi.hProcess)) {
+      trackWithDebugJob = true;
+    }
+  }
+
   ResumeThread(pi.hThread);
   CloseHandle(pi.hThread);
 
-  WaitForSingleObject(pi.hProcess, INFINITE);
+  if (trackWithDebugJob) {
+    if (debugJob) {
+      waitedForJob = WaitForJobToDrain(debugJob);
+    }
+  }
+  if (debugJob) {
+    CloseHandle(debugJob);
+    debugJob = nullptr;
+  }
+
+  if (!waitedForJob) {
+    WaitForSingleObject(pi.hProcess, INFINITE);
+  }
   debugBridge.Stop();
   DWORD exitCode = 0;
   GetExitCodeProcess(pi.hProcess, &exitCode);

@@ -84,15 +84,30 @@ std::vector<uint8_t> EnsureWideStringData(DWORD type, const BYTE* data, DWORD cb
     return out;
   }
 
-  std::wstring wide = AnsiToWide(reinterpret_cast<const char*>(data), (int)cbData);
-  if (wide.empty() || wide.back() != L'\0') {
-    wide.push_back(L'\0');
-  }
-  if (type == REG_MULTI_SZ) {
-    // Ensure double-null termination.
-    if (wide.size() < 2 || wide[wide.size() - 2] != L'\0') {
-      wide.push_back(L'\0');
+  const char* bytes = reinterpret_cast<const char*>(data);
+  size_t srcLen = (size_t)cbData;
+  if (type == REG_SZ || type == REG_EXPAND_SZ) {
+    size_t n = 0;
+    while (n < srcLen && bytes[n] != '\0') {
+      ++n;
     }
+    srcLen = n;
+  } else {
+    // REG_MULTI_SZ: keep complete strings up through the first double-NUL terminator.
+    size_t pos = 0;
+    while ((pos + 1) < srcLen) {
+      if (bytes[pos] == '\0' && bytes[pos + 1] == '\0') {
+        srcLen = pos;
+        break;
+      }
+      ++pos;
+    }
+  }
+
+  std::wstring wide = AnsiToWide(bytes, (int)srcLen);
+  wide.push_back(L'\0');
+  if (type == REG_MULTI_SZ) {
+    wide.push_back(L'\0');
   }
   std::vector<uint8_t> out(wide.size() * sizeof(wchar_t));
   std::memcpy(out.data(), wide.data(), out.size());
@@ -108,6 +123,23 @@ std::vector<uint8_t> WideToAnsiBytesForQuery(DWORD type, const std::vector<uint8
   }
   const wchar_t* w = reinterpret_cast<const wchar_t*>(wideBytes.data());
   int wchars = (int)(wideBytes.size() / sizeof(wchar_t));
+  if (type == REG_SZ || type == REG_EXPAND_SZ) {
+    int n = 0;
+    while (n < wchars && w[n] != L'\0') {
+      ++n;
+    }
+    wchars = n + 1;
+  } else {
+    // REG_MULTI_SZ: include data up through first double-NUL (or clamp to full buffer).
+    int pos = 0;
+    while ((pos + 1) < wchars) {
+      if (w[pos] == L'\0' && w[pos + 1] == L'\0') {
+        wchars = pos + 2;
+        break;
+      }
+      ++pos;
+    }
+  }
   int needed = WideCharToMultiByte(CP_ACP, 0, w, wchars, nullptr, 0, nullptr, nullptr);
   if (needed <= 0) {
     return std::vector<uint8_t>{0};
