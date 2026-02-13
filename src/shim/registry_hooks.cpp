@@ -357,11 +357,33 @@ void DeleteVirtualKey(VirtualKey* vk) {
   if (!vk) {
     return;
   }
+  // Keep virtual key objects alive for the process lifetime while hooks are
+  // active. Concurrent hook calls can still observe the handle value after a
+  // close on another thread; deleting here can cause a use-after-free.
+}
+
+void DestroyAllVirtualKeys() {
+  std::vector<VirtualKey*> toFree;
   {
     std::lock_guard<std::mutex> lock(g_virtualKeysMutex);
-    g_virtualKeys.erase(vk);
+    toFree.reserve(g_virtualKeys.size());
+    for (auto* vk : g_virtualKeys) {
+      toFree.push_back(vk);
+    }
+    g_virtualKeys.clear();
   }
-  delete vk;
+
+  for (auto* vk : toFree) {
+    if (!vk) {
+      continue;
+    }
+    if (vk->real) {
+      BypassGuard guard;
+      fpRegCloseKey(vk->real);
+      vk->real = nullptr;
+    }
+    delete vk;
+  }
 }
 
 #include "shim/registry_hooks_hooks_core.inl"
@@ -451,6 +473,7 @@ bool InstallRegistryHooks() {
 void RemoveRegistryHooks() {
   MH_DisableHook(MH_ALL_HOOKS);
   MH_Uninitialize();
+  DestroyAllVirtualKeys();
 }
 
 }
