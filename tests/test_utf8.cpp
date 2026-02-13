@@ -5,7 +5,7 @@
 using namespace hklmwrap;
 
 TEST_CASE("UTF-8 round trip works for ASCII and Unicode", "[utf8]") {
-  const std::wstring text = L"Hello 世界 ✓";
+  const std::wstring text = L"Hello \u4E16\u754C \u2713";
   const std::string utf8 = WideToUtf8(text);
   REQUIRE(!utf8.empty());
 
