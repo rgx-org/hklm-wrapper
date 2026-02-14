@@ -452,12 +452,26 @@ static bool CreateHookApiTypedWithFallback(LPCSTR procName, TDetour detour, TOri
       L"api-ms-win-core-registry-l1-1-0.dll",
   };
 
+  // Important: multiple call sites in a process can bind the same registry API
+  // via different modules (Advapi32 vs KernelBase vs API-set forwarders). If we
+  // only hook the first module that happens to resolve on the current system,
+  // a virtual HKEY created by a hooked entry point can later be consumed by an
+  // unhooked entry point, leading to an access violation inside the real
+  // registry implementation.
+  //
+  // Therefore we attempt to create hooks in *all* candidate modules.
+  bool hookedAny = false;
   for (LPCWSTR moduleName : kModules) {
-    if (CreateHookApiTyped(moduleName, procName, detour, original)) {
-      return true;
+    // Preserve the first successfully-captured original pointer. Subsequent
+    // hooks for the same API can use a throwaway trampoline.
+    if (*original == nullptr) {
+      hookedAny |= CreateHookApiTyped(moduleName, procName, detour, original);
+    } else {
+      TOriginal tmpOriginal = nullptr;
+      hookedAny |= CreateHookApiTyped(moduleName, procName, detour, &tmpOriginal);
     }
   }
-  return false;
+  return hookedAny;
 }
 
 bool InstallRegistryHooks() {
