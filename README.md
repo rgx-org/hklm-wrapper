@@ -106,6 +106,10 @@ One-shot helper:
 scripts\test-windows-msvc-x86.cmd
 ```
 
+By default, tests write temporary DBs and workflow runtime artifacts under the build tree (for example
+`build\\native-tests-windows\\test-tmp\\hklm-wrapper-tests\\...`) instead of `%TEMP%`.
+Override the base directory by setting `HKLM_WRAPPER_TEST_TMP_BASE`.
+
 This suite includes a Windows-only workflow test that launches `hklm_wrapper_cli.exe --debug all` around a probe process and verifies both hook debug trace output and persisted SQLite-backed registry data.
 
 ## Run

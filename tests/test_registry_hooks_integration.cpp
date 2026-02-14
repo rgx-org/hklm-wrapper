@@ -1,5 +1,6 @@
 #include "common/local_registry_store.h"
 #include "shim/registry_hooks_utils.h"
+#include "test_tmp.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -14,8 +15,8 @@ using namespace hklmwrap;
 namespace {
 
 std::wstring MakeTempDbPath() {
-  auto base = std::filesystem::temp_directory_path() / "hklm-wrapper-tests";
-  std::filesystem::create_directories(base);
+  auto base = testutil::GetTestTempDir("db");
+  REQUIRE_FALSE(base.empty());
 
   static size_t counter = 0;
   counter++;

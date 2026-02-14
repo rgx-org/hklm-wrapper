@@ -8,6 +8,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
+# Default test temp base under the build tree, overrideable at runtime via
+# HKLM_WRAPPER_TEST_TMP_BASE.
+file(TO_CMAKE_PATH "${CMAKE_BINARY_DIR}/test-tmp" HKLM_WRAPPER_TEST_TMP_BASE_DEFAULT_PATH)
+
+function(hklm_wrapper_apply_test_tmp_base target)
+  target_compile_definitions(${target} PRIVATE
+    HKLM_WRAPPER_TEST_TMP_BASE_DEFAULT=\"${HKLM_WRAPPER_TEST_TMP_BASE_DEFAULT_PATH}\"
+  )
+endfunction()
+
 add_executable(hklm_common_tests
   test_arg_quote.cpp
   test_path_util.cpp
@@ -16,6 +26,8 @@ add_executable(hklm_common_tests
   ../src/common/path_util.cpp
   ../src/common/utf8.cpp
 )
+
+hklm_wrapper_apply_test_tmp_base(hklm_common_tests)
 
 target_include_directories(hklm_common_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -63,6 +75,8 @@ if(NOT _sqlite_target STREQUAL "")
     ../src/common/utf8.cpp
   )
 
+  hklm_wrapper_apply_test_tmp_base(hklm_store_tests)
+
   target_include_directories(hklm_store_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -101,6 +115,8 @@ if(WIN32)
     ../src/shim/registry_hooks_utils.cpp
   )
 
+  hklm_wrapper_apply_test_tmp_base(hklm_shim_utils_tests)
+
   target_include_directories(hklm_shim_utils_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -119,6 +135,8 @@ if(WIN32)
       ../src/shim/registry_hooks_utils.cpp
     )
 
+    hklm_wrapper_apply_test_tmp_base(hklm_shim_integration_tests)
+
     target_include_directories(hklm_shim_integration_tests PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/..
       ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -136,6 +154,8 @@ if(WIN32)
       ../src/common/path_util.cpp
       ../src/common/utf8.cpp
     )
+
+    hklm_wrapper_apply_test_tmp_base(hklm_shim_workflow_tests)
 
     target_include_directories(hklm_shim_workflow_tests PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/..

@@ -1,5 +1,6 @@
 #include "common/arg_quote.h"
 #include "common/local_registry_store.h"
+#include "test_tmp.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -33,8 +34,8 @@ std::wstring GetModuleFilePath() {
 
 std::filesystem::path MakeTempWorkflowDir() {
   std::error_code ec;
-  const std::filesystem::path base = std::filesystem::temp_directory_path(ec);
-  if (ec || base.empty()) {
+  const std::filesystem::path base = testutil::GetTestTempDir("workflow");
+  if (base.empty()) {
     return {};
   }
 
