@@ -157,11 +157,23 @@ static std::wstring BytesToHexCsv(const std::vector<uint8_t>& b) {
   return out;
 }
 
+static std::wstring TypeIdToHex(uint32_t typeId) {
+  // Render as lower-case hex without 0x prefix.
+  std::wstringstream ss;
+  ss << std::hex << std::nouppercase << typeId;
+  return ss.str();
+}
+
 static std::wstring FormatRegLine(const std::wstring& valueName, uint32_t type, const std::vector<uint8_t>& data) {
   std::wstring left = ValueNameToReg(valueName);
-  if (type == REG_DWORD && data.size() >= 4) {
+  if (type == REG_DWORD) {
+    // regedit exports DWORD as exactly 4 bytes.
+    uint8_t buf4[4] = {0, 0, 0, 0};
+    if (!data.empty()) {
+      std::memcpy(buf4, data.data(), (std::min)(size_t{4}, data.size()));
+    }
     uint32_t v = 0;
-    std::memcpy(&v, data.data(), 4);
+    std::memcpy(&v, buf4, 4);
     wchar_t buf[32];
 #if defined(_WIN32)
     swprintf_s(buf, L"%08x", v);
@@ -170,9 +182,12 @@ static std::wstring FormatRegLine(const std::wstring& valueName, uint32_t type, 
 #endif
     return left + L"=dword:" + buf;
   }
-  if (type == REG_QWORD && data.size() >= 8) {
-    // .reg represents QWORD as hex(b): with little-endian bytes.
-    std::vector<uint8_t> b(data.begin(), data.begin() + 8);
+  if (type == REG_QWORD) {
+    // regedit exports QWORD as hex(b): with exactly 8 bytes (little-endian).
+    std::vector<uint8_t> b(8, 0);
+    if (!data.empty()) {
+      std::memcpy(b.data(), data.data(), (std::min)(size_t{8}, data.size()));
+    }
     return left + L"=hex(b):" + BytesToHexCsv(b);
   }
   if (type == REG_SZ) {
@@ -186,7 +201,14 @@ static std::wstring FormatRegLine(const std::wstring& valueName, uint32_t type, 
     }
     return left + L"=\"" + EscapeRegString(s) + L"\"";
   }
-  return left + L"=hex:" + BytesToHexCsv(data);
+
+  // regedit uses:
+  //   REG_BINARY  -> hex:
+  //   Everything else (incl REG_NONE, REG_EXPAND_SZ, REG_MULTI_SZ, etc) -> hex(<n>):
+  if (type == REG_BINARY) {
+    return left + L"=hex:" + BytesToHexCsv(data);
+  }
+  return left + L"=hex(" + TypeIdToHex(type) + L"):" + BytesToHexCsv(data);
 }
 
 std::wstring BuildRegExportContent(const std::vector<LocalRegistryStore::ExportRow>& rows, const std::wstring& prefix) {
@@ -218,6 +240,21 @@ bool ImportRegText(LocalRegistryStore& store, const std::wstring& text) {
   std::wstring currentKey;
   while (std::getline(iss, line)) {
     line = Trim(line);
+
+    // regedit may wrap long hex lists using a trailing backslash continuation.
+    // Example:
+    //   "Blob"=hex:de,ad,be,ef,\
+    //     01,02
+    while (!line.empty() && line.back() == L'\\') {
+      line.pop_back();
+      std::wstring next;
+      if (!std::getline(iss, next)) {
+        break;
+      }
+      next = Trim(next);
+      line += next;
+    }
+
     if (line.empty() || line[0] == L';') {
       continue;
     }
@@ -293,6 +330,14 @@ bool ImportRegText(LocalRegistryStore& store, const std::wstring& text) {
     if (right.rfind(L"hex(b):", 0) == 0) {
       std::wstring hex = right.substr(7);
       auto data = ParseData(REG_BINARY, hex);
+
+      // regedit exports QWORD as exactly 8 bytes. Normalize to 8 here so it round-trips.
+      if (data.size() < 8) {
+        data.resize(8, 0);
+      } else if (data.size() > 8) {
+        data.resize(8);
+      }
+
       if (!store.PutValue(currentKey, valueName, REG_QWORD, data.data(), (uint32_t)data.size())) {
         return false;
       }

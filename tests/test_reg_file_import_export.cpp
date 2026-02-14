@@ -81,7 +81,10 @@ TEST_CASE("hklmreg reg import handles hex(n) typed values", "[hklmreg][regfile]"
       L"Windows Registry Editor Version 5.00\r\n\r\n"
       L"[HKEY_LOCAL_MACHINE\\SOFTWARE\\ExampleVendor\\ExampleApp]\r\n"
       L"\"0\"=hex(0):\r\n"
-      L"\"X\"=hex(2):01,02,0a,ff\r\n\r\n";
+  L"\"X\"=hex(2):01,02,0a,ff\r\n"
+  // Wrapped hex blob using regedit continuation style.
+  L"\"Blob\"=hex:de,ad,be,ef,\\\r\n"
+  L"  01,02\r\n\r\n";
 
   REQUIRE(regfile::ImportRegText(store, regText));
 
@@ -104,4 +107,25 @@ TEST_CASE("hklmreg reg import handles hex(n) typed values", "[hklmreg][regfile]"
     CHECK(v->data[2] == 0x0a);
     CHECK(v->data[3] == 0xff);
   }
+
+  {
+    const auto v = store.GetValue(L"HKLM\\SOFTWARE\\ExampleVendor\\ExampleApp", L"Blob");
+    REQUIRE(v.has_value());
+    CHECK(v->isDeleted == false);
+    CHECK(v->type == 3u);
+    REQUIRE(v->data.size() == 6);
+    CHECK(v->data[0] == 0xde);
+    CHECK(v->data[1] == 0xad);
+    CHECK(v->data[2] == 0xbe);
+    CHECK(v->data[3] == 0xef);
+    CHECK(v->data[4] == 0x01);
+    CHECK(v->data[5] == 0x02);
+  }
+
+  const auto rows = store.ExportAll();
+  const std::wstring out = regfile::BuildRegExportContent(rows, L"");
+  CHECK(ContainsLine(out, L"[HKEY_LOCAL_MACHINE\\SOFTWARE\\ExampleVendor\\ExampleApp]"));
+  CHECK(ContainsLine(out, L"\"0\"=hex(0):"));
+  CHECK(ContainsLine(out, L"\"X\"=hex(2):01,02,0a,ff"));
+  CHECK(ContainsLine(out, L"\"Blob\"=hex:de,ad,be,ef,01,02"));
 }
