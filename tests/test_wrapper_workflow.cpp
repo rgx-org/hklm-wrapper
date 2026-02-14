@@ -144,6 +144,55 @@ std::wstring ReadRegSzText(const StoredValue& stored) {
 
 } // namespace
 
+TEST_CASE("shim hook install succeeds in debug workflow run", "[shim][workflow]") {
+  const std::filesystem::path testExePath = GetModuleFilePath();
+  REQUIRE_FALSE(testExePath.empty());
+
+  const std::filesystem::path testsDir = testExePath.parent_path();
+  const std::filesystem::path buildDir = testsDir.parent_path();
+
+  const std::filesystem::path wrapperPath = buildDir / "hklm_wrapper_cli.exe";
+  const std::filesystem::path shimPath = buildDir / "hklm_shim.dll";
+  const std::filesystem::path probePath = testsDir / "hklm_workflow_probe.exe";
+
+  REQUIRE(std::filesystem::exists(wrapperPath));
+  REQUIRE(std::filesystem::exists(shimPath));
+  REQUIRE(std::filesystem::exists(probePath));
+
+  const std::filesystem::path isolatedDir = MakeTempWorkflowDir();
+  REQUIRE_FALSE(isolatedDir.empty());
+
+  REQUIRE(CopyRuntimeArtifact(wrapperPath, isolatedDir));
+  REQUIRE(CopyRuntimeArtifact(shimPath, isolatedDir));
+  REQUIRE(CopyRuntimeArtifact(probePath, isolatedDir));
+
+  const std::filesystem::path isolatedWrapperPath = isolatedDir / wrapperPath.filename();
+  const std::filesystem::path isolatedProbePath = isolatedDir / probePath.filename();
+
+  const std::wstring suffix =
+      L"hook-" + std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId())) + L"-" +
+      std::to_wstring(static_cast<unsigned long>(GetTickCount64()));
+
+  const auto run = RunWithCapturedOutput(isolatedWrapperPath.wstring(),
+                                         {L"--debug", L"all", isolatedProbePath.wstring(), suffix},
+                                         isolatedDir.wstring());
+
+  REQUIRE(run.has_value());
+  CAPTURE(run->exitCode);
+  CAPTURE(run->mergedOutput);
+  REQUIRE(run->exitCode == 0);
+
+  // DllMain starts a hook init thread that reports its status via the debug pipe.
+  REQUIRE(run->mergedOutput.find("[shim] hook init thread started") != std::string::npos);
+  REQUIRE(run->mergedOutput.find("[shim] hook install succeeded") != std::string::npos);
+
+  // Also require at least one traced API call to prove the hook path is actually exercised.
+  REQUIRE(run->mergedOutput.find("api=RegCreateKeyExW") != std::string::npos);
+
+  std::error_code cleanupEc;
+  std::filesystem::remove_all(isolatedDir, cleanupEc);
+}
+
 TEST_CASE("wrapper debug mode covers injected hook and store data flow", "[shim][workflow]") {
   const std::filesystem::path testExePath = GetModuleFilePath();
   REQUIRE_FALSE(testExePath.empty());
@@ -182,7 +231,12 @@ TEST_CASE("wrapper debug mode covers injected hook and store data flow", "[shim]
                                          isolatedDir.wstring());
 
   REQUIRE(run.has_value());
+  CAPTURE(run->exitCode);
+  CAPTURE(run->mergedOutput);
   REQUIRE(run->exitCode == 0);
+
+  // If this fails, none of the subsequent debug-trace expectations will make sense.
+  REQUIRE(run->mergedOutput.find("[shim] hook install succeeded") != std::string::npos);
 
   const std::string expectedKey = "HKLM\\Software\\hklm-wrapper-workflow\\e2e-";
   CHECK(run->mergedOutput.find("api=RegCreateKeyExW op=create_key") != std::string::npos);

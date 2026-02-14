@@ -438,6 +438,28 @@ static bool CreateHookApiTyped(LPCWSTR moduleName, LPCSTR procName, TDetour deto
          MH_OK;
 }
 
+template <typename TDetour, typename TOriginal>
+static bool CreateHookApiTypedWithFallback(LPCSTR procName, TDetour detour, TOriginal* original) {
+  // Newer Windows/MSVC SDKs may bind registry imports via API-set DLLs and/or
+  // forward to KernelBase. Hook KernelBase first (catches forwarders), then fall
+  // back to advapi32 and the common API-set module.
+  static constexpr LPCWSTR kModules[] = {
+      L"kernelbase",
+      L"KernelBase.dll",
+      L"advapi32",
+      L"Advapi32.dll",
+      L"api-ms-win-core-registry-l1-1-0",
+      L"api-ms-win-core-registry-l1-1-0.dll",
+  };
+
+  for (LPCWSTR moduleName : kModules) {
+    if (CreateHookApiTyped(moduleName, procName, detour, original)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool InstallRegistryHooks() {
   g_hooksEnabled.store(false, std::memory_order_release);
   if (ShouldDisableHooks()) {
@@ -455,48 +477,48 @@ bool InstallRegistryHooks() {
   auto ok = true;
   // Core W/Unicode hooks (default): include all common handle consumers so
   // virtual HKEY handles never leak into unhooked advapi32 entry points.
-  ok &= CreateHookApiTyped(L"advapi32", "RegOpenKeyExW", &Hook_RegOpenKeyExW, &fpRegOpenKeyExW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegCreateKeyExW", &Hook_RegCreateKeyExW, &fpRegCreateKeyExW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegCloseKey", &Hook_RegCloseKey, &fpRegCloseKey);
-  ok &= CreateHookApiTyped(L"advapi32", "RegSetValueExW", &Hook_RegSetValueExW, &fpRegSetValueExW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegQueryValueExW", &Hook_RegQueryValueExW, &fpRegQueryValueExW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegDeleteValueW", &Hook_RegDeleteValueW, &fpRegDeleteValueW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegDeleteKeyW", &Hook_RegDeleteKeyW, &fpRegDeleteKeyW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegOpenKeyW", &Hook_RegOpenKeyW, &fpRegOpenKeyW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegCreateKeyW", &Hook_RegCreateKeyW, &fpRegCreateKeyW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegQueryValueW", &Hook_RegQueryValueW, &fpRegQueryValueW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegSetValueW", &Hook_RegSetValueW, &fpRegSetValueW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegEnumValueW", &Hook_RegEnumValueW, &fpRegEnumValueW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegEnumKeyExW", &Hook_RegEnumKeyExW, &fpRegEnumKeyExW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegEnumKeyW", &Hook_RegEnumKeyW, &fpRegEnumKeyW);
-  ok &= CreateHookApiTyped(L"advapi32", "RegQueryInfoKeyW", &Hook_RegQueryInfoKeyW, &fpRegQueryInfoKeyW);
+  ok &= CreateHookApiTypedWithFallback("RegOpenKeyExW", &Hook_RegOpenKeyExW, &fpRegOpenKeyExW);
+  ok &= CreateHookApiTypedWithFallback("RegCreateKeyExW", &Hook_RegCreateKeyExW, &fpRegCreateKeyExW);
+  ok &= CreateHookApiTypedWithFallback("RegCloseKey", &Hook_RegCloseKey, &fpRegCloseKey);
+  ok &= CreateHookApiTypedWithFallback("RegSetValueExW", &Hook_RegSetValueExW, &fpRegSetValueExW);
+  ok &= CreateHookApiTypedWithFallback("RegQueryValueExW", &Hook_RegQueryValueExW, &fpRegQueryValueExW);
+  ok &= CreateHookApiTypedWithFallback("RegDeleteValueW", &Hook_RegDeleteValueW, &fpRegDeleteValueW);
+  ok &= CreateHookApiTypedWithFallback("RegDeleteKeyW", &Hook_RegDeleteKeyW, &fpRegDeleteKeyW);
+  ok &= CreateHookApiTypedWithFallback("RegOpenKeyW", &Hook_RegOpenKeyW, &fpRegOpenKeyW);
+  ok &= CreateHookApiTypedWithFallback("RegCreateKeyW", &Hook_RegCreateKeyW, &fpRegCreateKeyW);
+  ok &= CreateHookApiTypedWithFallback("RegQueryValueW", &Hook_RegQueryValueW, &fpRegQueryValueW);
+  ok &= CreateHookApiTypedWithFallback("RegSetValueW", &Hook_RegSetValueW, &fpRegSetValueW);
+  ok &= CreateHookApiTypedWithFallback("RegEnumValueW", &Hook_RegEnumValueW, &fpRegEnumValueW);
+  ok &= CreateHookApiTypedWithFallback("RegEnumKeyExW", &Hook_RegEnumKeyExW, &fpRegEnumKeyExW);
+  ok &= CreateHookApiTypedWithFallback("RegEnumKeyW", &Hook_RegEnumKeyW, &fpRegEnumKeyW);
+  ok &= CreateHookApiTypedWithFallback("RegQueryInfoKeyW", &Hook_RegQueryInfoKeyW, &fpRegQueryInfoKeyW);
 
   // Optional on older systems.
-  (void)CreateHookApiTyped(L"advapi32", "RegSetKeyValueW", &Hook_RegSetKeyValueW, &fpRegSetKeyValueW);
+  (void)CreateHookApiTypedWithFallback("RegSetKeyValueW", &Hook_RegSetKeyValueW, &fpRegSetKeyValueW);
 
   // Optional on older systems.
-  (void)CreateHookApiTyped(L"advapi32", "RegDeleteKeyExW", &Hook_RegDeleteKeyExW, &fpRegDeleteKeyExW);
+  (void)CreateHookApiTypedWithFallback("RegDeleteKeyExW", &Hook_RegDeleteKeyExW, &fpRegDeleteKeyExW);
 
   if (extended) {
-    ok &= CreateHookApiTyped(L"advapi32", "RegOpenKeyExA", &Hook_RegOpenKeyExA, &fpRegOpenKeyExA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegCreateKeyExA", &Hook_RegCreateKeyExA, &fpRegCreateKeyExA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegSetValueExA", &Hook_RegSetValueExA, &fpRegSetValueExA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegQueryValueExA", &Hook_RegQueryValueExA, &fpRegQueryValueExA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegDeleteValueA", &Hook_RegDeleteValueA, &fpRegDeleteValueA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegDeleteKeyA", &Hook_RegDeleteKeyA, &fpRegDeleteKeyA);
+    ok &= CreateHookApiTypedWithFallback("RegOpenKeyExA", &Hook_RegOpenKeyExA, &fpRegOpenKeyExA);
+    ok &= CreateHookApiTypedWithFallback("RegCreateKeyExA", &Hook_RegCreateKeyExA, &fpRegCreateKeyExA);
+    ok &= CreateHookApiTypedWithFallback("RegSetValueExA", &Hook_RegSetValueExA, &fpRegSetValueExA);
+    ok &= CreateHookApiTypedWithFallback("RegQueryValueExA", &Hook_RegQueryValueExA, &fpRegQueryValueExA);
+    ok &= CreateHookApiTypedWithFallback("RegDeleteValueA", &Hook_RegDeleteValueA, &fpRegDeleteValueA);
+    ok &= CreateHookApiTypedWithFallback("RegDeleteKeyA", &Hook_RegDeleteKeyA, &fpRegDeleteKeyA);
 
-    ok &= CreateHookApiTyped(L"advapi32", "RegOpenKeyA", &Hook_RegOpenKeyA, &fpRegOpenKeyA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegCreateKeyA", &Hook_RegCreateKeyA, &fpRegCreateKeyA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegQueryValueA", &Hook_RegQueryValueA, &fpRegQueryValueA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegSetValueA", &Hook_RegSetValueA, &fpRegSetValueA);
+    ok &= CreateHookApiTypedWithFallback("RegOpenKeyA", &Hook_RegOpenKeyA, &fpRegOpenKeyA);
+    ok &= CreateHookApiTypedWithFallback("RegCreateKeyA", &Hook_RegCreateKeyA, &fpRegCreateKeyA);
+    ok &= CreateHookApiTypedWithFallback("RegQueryValueA", &Hook_RegQueryValueA, &fpRegQueryValueA);
+    ok &= CreateHookApiTypedWithFallback("RegSetValueA", &Hook_RegSetValueA, &fpRegSetValueA);
 
-    ok &= CreateHookApiTyped(L"advapi32", "RegEnumValueA", &Hook_RegEnumValueA, &fpRegEnumValueA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegEnumKeyExA", &Hook_RegEnumKeyExA, &fpRegEnumKeyExA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegEnumKeyA", &Hook_RegEnumKeyA, &fpRegEnumKeyA);
-    ok &= CreateHookApiTyped(L"advapi32", "RegQueryInfoKeyA", &Hook_RegQueryInfoKeyA, &fpRegQueryInfoKeyA);
+    ok &= CreateHookApiTypedWithFallback("RegEnumValueA", &Hook_RegEnumValueA, &fpRegEnumValueA);
+    ok &= CreateHookApiTypedWithFallback("RegEnumKeyExA", &Hook_RegEnumKeyExA, &fpRegEnumKeyExA);
+    ok &= CreateHookApiTypedWithFallback("RegEnumKeyA", &Hook_RegEnumKeyA, &fpRegEnumKeyA);
+    ok &= CreateHookApiTypedWithFallback("RegQueryInfoKeyA", &Hook_RegQueryInfoKeyA, &fpRegQueryInfoKeyA);
 
     // Optional on older systems.
-    (void)CreateHookApiTyped(L"advapi32", "RegSetKeyValueA", &Hook_RegSetKeyValueA, &fpRegSetKeyValueA);
+    (void)CreateHookApiTypedWithFallback("RegSetKeyValueA", &Hook_RegSetKeyValueA, &fpRegSetKeyValueA);
   }
 
   if (!ok) {
