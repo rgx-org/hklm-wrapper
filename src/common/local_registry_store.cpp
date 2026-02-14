@@ -6,6 +6,7 @@
 
 #include <ctime>
 #include <cstring>
+#include <cwctype>
 #include <map>
 #include <set>
 
@@ -17,6 +18,27 @@ static int64_t NowUnixSeconds() {
 }
 
 static std::vector<std::wstring> KeyPrefixes(const std::wstring& keyPath);
+
+static std::wstring CaseFoldWide(const std::wstring& s) {
+  std::wstring out;
+  out.resize(s.size());
+  for (size_t i = 0; i < s.size(); i++) {
+    out[i] = (wchar_t)towlower(s[i]);
+  }
+  return out;
+}
+
+static bool StartsWithNoCase(const std::wstring& s, const std::wstring& prefix) {
+  if (prefix.size() > s.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < prefix.size(); i++) {
+    if ((wchar_t)towlower(s[i]) != (wchar_t)towlower(prefix[i])) {
+      return false;
+    }
+  }
+  return true;
+}
 
 static bool BindWideText(sqlite3_stmt* st, int index1, const std::wstring& text) {
   std::string utf8 = WideToUtf8(text);
@@ -107,23 +129,42 @@ bool LocalRegistryStore::PutKey(const std::wstring& keyPath) {
 
   const auto now = NowUnixSeconds();
 
-  // Create / undelete the exact key.
+  // Registry keys are case-insensitive. Prefer updating any existing row that
+  // matches case-insensitively; only insert if nothing matches.
   {
     sqlite3_stmt* st = nullptr;
-    const char* sql = "INSERT INTO keys(key_path, is_deleted, updated_at) VALUES(?,0,?) "
-                      "ON CONFLICT(key_path) DO UPDATE SET is_deleted=0, updated_at=excluded.updated_at;";
+    const char* sql = "UPDATE keys SET is_deleted=0, updated_at=? WHERE key_path=? COLLATE NOCASE;";
     if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
       return false;
     }
-    if (!BindWideText(st, 1, keyPath)) {
+    sqlite3_bind_int64(st, 1, now);
+    if (!BindWideText(st, 2, keyPath)) {
       sqlite3_finalize(st);
       return false;
     }
-    sqlite3_bind_int64(st, 2, now);
     int rc = sqlite3_step(st);
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
       return false;
+    }
+
+    if (sqlite3_changes(db_) == 0) {
+      sqlite3_stmt* stIns = nullptr;
+      const char* sqlIns = "INSERT INTO keys(key_path, is_deleted, updated_at) VALUES(?,0,?) "
+                           "ON CONFLICT(key_path) DO UPDATE SET is_deleted=0, updated_at=excluded.updated_at;";
+      if (sqlite3_prepare_v2(db_, sqlIns, -1, &stIns, nullptr) != SQLITE_OK) {
+        return false;
+      }
+      if (!BindWideText(stIns, 1, keyPath)) {
+        sqlite3_finalize(stIns);
+        return false;
+      }
+      sqlite3_bind_int64(stIns, 2, now);
+      rc = sqlite3_step(stIns);
+      sqlite3_finalize(stIns);
+      if (rc != SQLITE_DONE) {
+        return false;
+      }
     }
   }
 
@@ -131,7 +172,7 @@ bool LocalRegistryStore::PutKey(const std::wstring& keyPath) {
   // a bunch of implicit parent keys that weren't explicitly written).
   {
     sqlite3_stmt* st = nullptr;
-    const char* sql = "UPDATE keys SET is_deleted=0, updated_at=? WHERE key_path=?;";
+    const char* sql = "UPDATE keys SET is_deleted=0, updated_at=? WHERE key_path=? COLLATE NOCASE;";
     if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
       return false;
     }
@@ -163,26 +204,47 @@ bool LocalRegistryStore::DeleteKeyTree(const std::wstring& keyPath) {
 
   Exec("BEGIN IMMEDIATE;");
 
-  // Mark exact key and any known subkeys as deleted.
+  // Mark exact key as deleted (case-insensitive).
   {
     sqlite3_stmt* st = nullptr;
-    const char* sql = "INSERT INTO keys(key_path, is_deleted, updated_at) VALUES(?,1,?) "
-                      "ON CONFLICT(key_path) DO UPDATE SET is_deleted=1, updated_at=excluded.updated_at;";
+    const char* sql = "UPDATE keys SET is_deleted=1, updated_at=? WHERE key_path=? COLLATE NOCASE;";
     if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
       Exec("ROLLBACK;");
       return false;
     }
-    if (!BindWideText(st, 1, keyPath)) {
+    sqlite3_bind_int64(st, 1, NowUnixSeconds());
+    if (!BindWideText(st, 2, keyPath)) {
       sqlite3_finalize(st);
       Exec("ROLLBACK;");
       return false;
     }
-    sqlite3_bind_int64(st, 2, NowUnixSeconds());
     int rc = sqlite3_step(st);
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
       Exec("ROLLBACK;");
       return false;
+    }
+
+    if (sqlite3_changes(db_) == 0) {
+      sqlite3_stmt* stIns = nullptr;
+      const char* sqlIns = "INSERT INTO keys(key_path, is_deleted, updated_at) VALUES(?,1,?) "
+                           "ON CONFLICT(key_path) DO UPDATE SET is_deleted=1, updated_at=excluded.updated_at;";
+      if (sqlite3_prepare_v2(db_, sqlIns, -1, &stIns, nullptr) != SQLITE_OK) {
+        Exec("ROLLBACK;");
+        return false;
+      }
+      if (!BindWideText(stIns, 1, keyPath)) {
+        sqlite3_finalize(stIns);
+        Exec("ROLLBACK;");
+        return false;
+      }
+      sqlite3_bind_int64(stIns, 2, NowUnixSeconds());
+      rc = sqlite3_step(stIns);
+      sqlite3_finalize(stIns);
+      if (rc != SQLITE_DONE) {
+        Exec("ROLLBACK;");
+        return false;
+      }
     }
   }
 
@@ -191,7 +253,7 @@ bool LocalRegistryStore::DeleteKeyTree(const std::wstring& keyPath) {
     std::wstring like = keyPath;
     like.append(L"\\%");
     sqlite3_stmt* st = nullptr;
-    const char* sql = "UPDATE values_tbl SET is_deleted=1, updated_at=? WHERE key_path=? OR key_path LIKE ?;";
+    const char* sql = "UPDATE values_tbl SET is_deleted=1, updated_at=? WHERE key_path=? COLLATE NOCASE OR (key_path COLLATE NOCASE) LIKE ?;";
     if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
       Exec("ROLLBACK;");
       return false;
@@ -238,7 +300,7 @@ bool LocalRegistryStore::IsKeyDeleted(const std::wstring& keyPath) {
   }
   for (const auto& p : KeyPrefixes(keyPath)) {
     sqlite3_stmt* st = nullptr;
-    const char* sql = "SELECT is_deleted FROM keys WHERE key_path=? LIMIT 1;";
+    const char* sql = "SELECT MAX(is_deleted) FROM keys WHERE key_path=? COLLATE NOCASE;";
     if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
       return false;
     }
@@ -271,7 +333,7 @@ bool LocalRegistryStore::KeyExistsLocally(const std::wstring& keyPath) {
   // Key row.
   {
     sqlite3_stmt* st = nullptr;
-    const char* sql = "SELECT 1 FROM keys WHERE key_path=? AND is_deleted=0 LIMIT 1;";
+    const char* sql = "SELECT 1 FROM keys WHERE key_path=? COLLATE NOCASE AND is_deleted=0 LIMIT 1;";
     if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
       return false;
     }
@@ -288,7 +350,7 @@ bool LocalRegistryStore::KeyExistsLocally(const std::wstring& keyPath) {
   // Any value under the key.
   {
     sqlite3_stmt* st = nullptr;
-    const char* sql = "SELECT 1 FROM values_tbl WHERE key_path=? AND is_deleted=0 LIMIT 1;";
+    const char* sql = "SELECT 1 FROM values_tbl WHERE key_path=? COLLATE NOCASE AND is_deleted=0 LIMIT 1;";
     if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
       return false;
     }
@@ -312,6 +374,38 @@ bool LocalRegistryStore::PutValue(const std::wstring& keyPath,
   }
   PutKey(keyPath);
 
+  const auto now = NowUnixSeconds();
+
+  // Update any existing row matching case-insensitively; only insert if nothing matches.
+  {
+    sqlite3_stmt* st = nullptr;
+    const char* sql =
+        "UPDATE values_tbl SET type=?, data=?, is_deleted=0, updated_at=? "
+        "WHERE key_path=? COLLATE NOCASE AND value_name=? COLLATE NOCASE;";
+    if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
+      return false;
+    }
+    sqlite3_bind_int(st, 1, (int)type);
+    if (data && dataSize) {
+      sqlite3_bind_blob(st, 2, data, (int)dataSize, SQLITE_TRANSIENT);
+    } else {
+      sqlite3_bind_null(st, 2);
+    }
+    sqlite3_bind_int64(st, 3, now);
+    if (!BindWideText(st, 4, keyPath) || !BindWideText(st, 5, valueName)) {
+      sqlite3_finalize(st);
+      return false;
+    }
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+      return false;
+    }
+    if (sqlite3_changes(db_) != 0) {
+      return true;
+    }
+  }
+
   sqlite3_stmt* st = nullptr;
   const char* sql =
       "INSERT INTO values_tbl(key_path, value_name, type, data, is_deleted, updated_at) VALUES(?,?,?,?,0,?) "
@@ -330,7 +424,7 @@ bool LocalRegistryStore::PutValue(const std::wstring& keyPath,
   } else {
     sqlite3_bind_null(st, 4);
   }
-  sqlite3_bind_int64(st, 5, NowUnixSeconds());
+  sqlite3_bind_int64(st, 5, now);
   int rc = sqlite3_step(st);
   sqlite3_finalize(st);
   return rc == SQLITE_DONE;
@@ -341,6 +435,30 @@ bool LocalRegistryStore::DeleteValue(const std::wstring& keyPath, const std::wst
     return false;
   }
   PutKey(keyPath);
+
+  const auto now = NowUnixSeconds();
+
+  // Update any existing row matching case-insensitively; only insert if nothing matches.
+  {
+    sqlite3_stmt* st = nullptr;
+    const char* sql = "UPDATE values_tbl SET is_deleted=1, updated_at=? WHERE key_path=? COLLATE NOCASE AND value_name=? COLLATE NOCASE;";
+    if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
+      return false;
+    }
+    sqlite3_bind_int64(st, 1, now);
+    if (!BindWideText(st, 2, keyPath) || !BindWideText(st, 3, valueName)) {
+      sqlite3_finalize(st);
+      return false;
+    }
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+      return false;
+    }
+    if (sqlite3_changes(db_) != 0) {
+      return true;
+    }
+  }
 
   sqlite3_stmt* st = nullptr;
   const char* sql =
@@ -353,7 +471,7 @@ bool LocalRegistryStore::DeleteValue(const std::wstring& keyPath, const std::wst
     sqlite3_finalize(st);
     return false;
   }
-  sqlite3_bind_int64(st, 3, NowUnixSeconds());
+  sqlite3_bind_int64(st, 3, now);
   int rc = sqlite3_step(st);
   sqlite3_finalize(st);
   return rc == SQLITE_DONE;
@@ -369,7 +487,10 @@ std::optional<StoredValue> LocalRegistryStore::GetValue(const std::wstring& keyP
     return tombstone;
   }
   sqlite3_stmt* st = nullptr;
-  const char* sql = "SELECT type, data, is_deleted FROM values_tbl WHERE key_path=? AND value_name=? LIMIT 1;";
+  const char* sql =
+      "SELECT type, data, is_deleted FROM values_tbl "
+      "WHERE key_path=? COLLATE NOCASE AND value_name=? COLLATE NOCASE "
+      "ORDER BY updated_at DESC LIMIT 1;";
   if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
     return std::nullopt;
   }
@@ -406,7 +527,10 @@ std::vector<LocalRegistryStore::ValueRow> LocalRegistryStore::ListValues(const s
   }
 
   sqlite3_stmt* st = nullptr;
-  const char* sql = "SELECT value_name, type, data, is_deleted FROM values_tbl WHERE key_path=?;";
+  const char* sql =
+      "SELECT value_name, type, data, is_deleted, updated_at FROM values_tbl "
+      "WHERE key_path=? COLLATE NOCASE "
+      "ORDER BY value_name COLLATE NOCASE ASC, updated_at DESC;";
   if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
     return rows;
   }
@@ -414,6 +538,8 @@ std::vector<LocalRegistryStore::ValueRow> LocalRegistryStore::ListValues(const s
     sqlite3_finalize(st);
     return rows;
   }
+
+  std::set<std::wstring> seenFolded;
   while (sqlite3_step(st) == SQLITE_ROW) {
     uint32_t type = (uint32_t)sqlite3_column_int(st, 1);
     const void* blob = sqlite3_column_blob(st, 2);
@@ -422,6 +548,11 @@ std::vector<LocalRegistryStore::ValueRow> LocalRegistryStore::ListValues(const s
 
     ValueRow r;
     r.valueName = ColumnWideText(st, 0);
+    const auto folded = CaseFoldWide(r.valueName);
+    if (seenFolded.find(folded) != seenFolded.end()) {
+      continue;
+    }
+    seenFolded.insert(folded);
     r.type = type;
     r.isDeleted = deleted != 0;
     if (blob && blobSize > 0) {
@@ -447,7 +578,7 @@ std::vector<std::wstring> LocalRegistryStore::ListImmediateSubKeys(const std::ws
   like.append(L"\\%");
 
   sqlite3_stmt* st = nullptr;
-  const char* sql = "SELECT key_path, is_deleted FROM keys WHERE key_path LIKE ?;";
+  const char* sql = "SELECT key_path, is_deleted FROM keys WHERE (key_path COLLATE NOCASE) LIKE ?;";
   if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) {
     return subkeys;
   }
@@ -456,7 +587,7 @@ std::vector<std::wstring> LocalRegistryStore::ListImmediateSubKeys(const std::ws
     return subkeys;
   }
 
-  std::set<std::wstring> uniq;
+  std::map<std::wstring, std::wstring> foldedToDisplay;
   const std::wstring prefix = keyPath + L"\\";
   while (sqlite3_step(st) == SQLITE_ROW) {
     int deleted = sqlite3_column_int(st, 1);
@@ -470,19 +601,25 @@ std::vector<std::wstring> LocalRegistryStore::ListImmediateSubKeys(const std::ws
     if (full.size() <= prefix.size()) {
       continue;
     }
-    if (full.rfind(prefix, 0) != 0) {
+    if (!StartsWithNoCase(full, prefix)) {
       continue;
     }
     std::wstring rem = full.substr(prefix.size());
     auto pos = rem.find(L'\\');
     std::wstring child = (pos == std::wstring::npos) ? rem : rem.substr(0, pos);
     if (!child.empty()) {
-      uniq.insert(child);
+      const auto folded = CaseFoldWide(child);
+      if (foldedToDisplay.find(folded) == foldedToDisplay.end()) {
+        foldedToDisplay.emplace(folded, child);
+      }
     }
   }
   sqlite3_finalize(st);
 
-  subkeys.assign(uniq.begin(), uniq.end());
+  subkeys.reserve(foldedToDisplay.size());
+  for (auto& kv : foldedToDisplay) {
+    subkeys.push_back(std::move(kv.second));
+  }
   return subkeys;
 }
 

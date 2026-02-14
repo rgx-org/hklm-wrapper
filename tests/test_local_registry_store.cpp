@@ -144,3 +144,47 @@ TEST_CASE("LocalRegistryStore export includes keys with no values", "[store]") {
   CHECK_FALSE(hasAnyRowForKey(L"HKLM"));
   CHECK_FALSE(hasAnyRowForKey(L"HKLM\\SOFTWARE"));
 }
+
+TEST_CASE("LocalRegistryStore key/value lookups are case-insensitive", "[store]") {
+  LocalRegistryStore store;
+  const std::wstring dbPath = MakeTempDbPath();
+  REQUIRE(store.Open(dbPath));
+
+  const std::wstring keyImport = L"HKLM\\Software\\ExampleVendor\\ExampleApp";
+  const std::wstring valueImport = L"InstallDir";
+  const std::vector<uint8_t> payload = {0x10, 0x20, 0x30};
+
+  REQUIRE(store.PutValue(keyImport, valueImport, REG_BINARY, payload.data(), static_cast<uint32_t>(payload.size())));
+
+  // Different casing should still find the same logical key/value.
+  const std::wstring keyQuery = L"hklm\\SOFTWARE\\examplevendor\\EXAMPLEAPP";
+  const std::wstring valueQuery = L"installdir";
+
+  CHECK(store.KeyExistsLocally(keyQuery));
+  {
+    const auto v = store.GetValue(keyQuery, valueQuery);
+    REQUIRE(v.has_value());
+    CHECK_FALSE(v->isDeleted);
+    CHECK(v->type == REG_BINARY);
+    CHECK(v->data == payload);
+  }
+
+  {
+    const auto rows = store.ListValues(keyQuery);
+    REQUIRE(rows.size() == 1);
+    CHECK_FALSE(rows[0].isDeleted);
+    CHECK(rows[0].data == payload);
+  }
+
+  // Tombstones should also be case-insensitive.
+  REQUIRE(store.DeleteValue(keyQuery, valueQuery));
+  {
+    const auto v = store.GetValue(L"HKLM\\software\\ExampleVendor\\exampleapp", L"INSTALLDIR");
+    REQUIRE(v.has_value());
+    CHECK(v->isDeleted);
+  }
+
+  // Key deletion should be case-insensitive.
+  REQUIRE(store.DeleteKeyTree(L"HKLM\\SOFTWARE\\EXAMPLEVENDOR"));
+  CHECK(store.IsKeyDeleted(keyImport));
+}
