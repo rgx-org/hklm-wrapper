@@ -13,15 +13,21 @@
 #include <cstring>
 #include <cwctype>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 using namespace hklmwrap;
 
 static void PrintUsage() {
-  std::wcerr << L"hklmreg --db <path> <add|delete|export|import> [options]\n"
+  std::wcerr << L"hklmreg --db <path> <add|delete|export|import|dump> [options]\n"
                 L"\n"
                 L"Commands (REG-like subset):\n"
                 L"  add    <KeyName> /v <ValueName> [/t <Type>] /d <Data> [/f]\n"
                 L"  delete <KeyName> [/v <ValueName>] [/f]\n"
                 L"  export <FileName> [<KeyNamePrefix>]\n"
+                L"  dump   [<KeyNamePrefix>]\n"
                 L"  import <FileName>\n"
                 L"\n"
                 L"KeyName examples: HKLM\\Software\\MyApp or HKEY_LOCAL_MACHINE\\Software\\MyApp\n"
@@ -180,12 +186,36 @@ static std::wstring FormatRegLine(const std::wstring& valueName, uint32_t type, 
 }
 
 static bool WriteUtf16LeFile(const std::wstring& path, const std::wstring& content) {
+#if defined(_WIN32)
+  static_assert(sizeof(wchar_t) == 2, "hklmreg expects UTF-16LE wchar_t");
+#endif
   std::ofstream f(WideToUtf8(path), std::ios::binary);
   if (!f) return false;
   uint16_t bom = 0xFEFF;
   f.write((const char*)&bom, 2);
   f.write((const char*)content.data(), (std::streamsize)(content.size() * sizeof(wchar_t)));
   return true;
+}
+
+static std::wstring BuildRegExportContent(const std::vector<LocalRegistryStore::ExportRow>& rows, const std::wstring& prefix) {
+  std::wstring content = L"Windows Registry Editor Version 5.00\r\n\r\n";
+  std::wstring currentKey;
+  for (const auto& r : rows) {
+    if (!prefix.empty()) {
+      if (r.keyPath.rfind(prefix, 0) != 0) {
+        continue;
+      }
+    }
+    if (r.keyPath != currentKey) {
+      currentKey = r.keyPath;
+      content += KeyToRegHeader(currentKey);
+      content += L"\r\n";
+    }
+    content += FormatRegLine(r.valueName, r.type, r.data);
+    content += L"\r\n";
+  }
+  content += L"\r\n";
+  return content;
 }
 
 static std::wstring ReadWholeFileUtf16OrUtf8(const std::wstring& path) {
@@ -327,25 +357,31 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring prefix = (i < argc) ? CanonKey(argv[i++]) : L"";
 
     auto rows = store.ExportAll();
-    std::wstring content = L"Windows Registry Editor Version 5.00\r\n\r\n";
-    std::wstring currentKey;
-    for (const auto& r : rows) {
-      if (!prefix.empty()) {
-        if (r.keyPath.rfind(prefix, 0) != 0) {
-          continue;
-        }
-      }
-      if (r.keyPath != currentKey) {
-        currentKey = r.keyPath;
-        content += KeyToRegHeader(currentKey);
-        content += L"\r\n";
-      }
-      content += FormatRegLine(r.valueName, r.type, r.data);
-      content += L"\r\n";
-    }
-    content += L"\r\n";
+    std::wstring content = BuildRegExportContent(rows, prefix);
     if (!WriteUtf16LeFile(outPath, content)) {
       std::wcerr << L"Failed to write: " << outPath << L"\n";
+      return 1;
+    }
+    return 0;
+  }
+
+  if (cmd == L"dump") {
+    std::wstring prefix = (i < argc) ? CanonKey(argv[i++]) : L"";
+    auto rows = store.ExportAll();
+    std::wstring content = BuildRegExportContent(rows, prefix);
+
+#if defined(_WIN32)
+    // Ensure pipes/redirection preserve raw UTF-16LE bytes.
+    (void)_setmode(_fileno(stdout), _O_BINARY);
+#endif
+
+    const uint16_t bom = 0xFEFF;
+    std::cout.write(reinterpret_cast<const char*>(&bom), 2);
+    std::cout.write(reinterpret_cast<const char*>(content.data()),
+                    static_cast<std::streamsize>(content.size() * sizeof(wchar_t)));
+    std::cout.flush();
+    if (!std::cout) {
+      std::wcerr << L"Failed to write to stdout\n";
       return 1;
     }
     return 0;

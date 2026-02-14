@@ -7,7 +7,7 @@ Win32 wrapper that launches a target EXE, injects `hklm_shim.dll`, and virtualiz
 - `hklm_wrapper.exe`: GUI launcher/injector (no console window when launched from GUI tools).
 - `hklm_wrapper_cli.exe`: console launcher/injector (recommended for `--debug` from cmd/PowerShell).
 - `hklm_shim.dll`: hooked registry layer.
-- `hklmreg.exe`: CLI for local DB add/delete/export/import.
+- `hklmreg.exe`: CLI for local DB add/delete/export/import/dump.
 
 Default DB name: `<TargetExeName>-HKLM.sqlite` (next to `hklm_wrapper.exe`).
 
@@ -100,6 +100,12 @@ scripts\cmake-msvc-x86.cmd --build --preset native-tests-windows
 ctest --preset native-tests-windows
 ```
 
+One-shot helper:
+
+```cmd
+scripts\test-windows-msvc-x86.cmd
+```
+
 This suite includes a Windows-only workflow test that launches `hklm_wrapper_cli.exe --debug all` around a probe process and verifies both hook debug trace output and persisted SQLite-backed registry data.
 
 ## Run
@@ -126,6 +132,7 @@ hklm_wrapper_cli.exe --debug all C:\Path\To\TargetApp.exe
 hklmreg --db .\TargetApp-HKLM.sqlite add HKLM\Software\MyApp /v Test /t REG_SZ /d hello /f
 hklmreg --db .\TargetApp-HKLM.sqlite delete HKLM\Software\MyApp /v Test /f
 hklmreg --db .\TargetApp-HKLM.sqlite export out.reg HKLM\Software\MyApp
+hklmreg --db .\TargetApp-HKLM.sqlite dump HKLM\Software\MyApp > out.reg
 hklmreg --db .\TargetApp-HKLM.sqlite import out.reg
 ```
 
