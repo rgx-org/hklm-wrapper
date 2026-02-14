@@ -211,8 +211,10 @@ static std::wstring BuildRegExportContent(const std::vector<LocalRegistryStore::
       content += KeyToRegHeader(currentKey);
       content += L"\r\n";
     }
-    content += FormatRegLine(r.valueName, r.type, r.data);
-    content += L"\r\n";
+    if (!r.isKeyOnly) {
+      content += FormatRegLine(r.valueName, r.type, r.data);
+      content += L"\r\n";
+    }
   }
   content += L"\r\n";
   return content;
@@ -242,6 +244,15 @@ static std::wstring Trim(const std::wstring& s) {
   while (b > a && iswspace(s[b - 1])) b--;
   return s.substr(a, b - a);
 }
+
+#if defined(_WIN32)
+static bool StdoutIsConsole() {
+  HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (h == INVALID_HANDLE_VALUE || h == nullptr) return false;
+  DWORD mode = 0;
+  return GetConsoleMode(h, &mode) != 0;
+}
+#endif
 
 int wmain(int argc, wchar_t** argv) {
   if (argc < 4) {
@@ -371,19 +382,34 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring content = BuildRegExportContent(rows, prefix);
 
 #if defined(_WIN32)
-    // Ensure pipes/redirection preserve raw UTF-16LE bytes.
-    (void)_setmode(_fileno(stdout), _O_BINARY);
-#endif
-
-    const uint16_t bom = 0xFEFF;
-    std::cout.write(reinterpret_cast<const char*>(&bom), 2);
-    std::cout.write(reinterpret_cast<const char*>(content.data()),
-                    static_cast<std::streamsize>(content.size() * sizeof(wchar_t)));
-    std::cout.flush();
+    if (StdoutIsConsole()) {
+      HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+      DWORD written = 0;
+      if (!WriteConsoleW(h, content.data(), static_cast<DWORD>(content.size()), &written, nullptr)) {
+        std::wcerr << L"Failed to write to console\n";
+        return 1;
+      }
+    } else {
+      // When redirected/piped, write UTF-16LE with BOM so consumers can detect encoding.
+      (void)_setmode(_fileno(stdout), _O_BINARY);
+      const uint16_t bom = 0xFEFF;
+      std::cout.write(reinterpret_cast<const char*>(&bom), 2);
+      std::cout.write(reinterpret_cast<const char*>(content.data()),
+                      static_cast<std::streamsize>(content.size() * sizeof(wchar_t)));
+      std::cout.flush();
+      if (!std::cout) {
+        std::wcerr << L"Failed to write to stdout\n";
+        return 1;
+      }
+    }
+#else
+    // Non-Windows builds (if any) emit UTF-8 to stdout.
+    std::cout << WideToUtf8(content);
     if (!std::cout) {
       std::wcerr << L"Failed to write to stdout\n";
       return 1;
     }
+#endif
     return 0;
   }
 

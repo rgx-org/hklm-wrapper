@@ -90,3 +90,57 @@ TEST_CASE("LocalRegistryStore keeps keys distinct and handles tombstones", "[sto
   CHECK(store.IsKeyDeleted(keyA));
   CHECK(store.IsKeyDeleted(keyB));
 }
+
+TEST_CASE("LocalRegistryStore export includes keys with no values", "[store]") {
+  LocalRegistryStore store;
+  const std::wstring dbPath = MakeTempDbPath();
+  REQUIRE(store.Open(dbPath));
+
+  const std::wstring baseKey = L"HKLM\\SOFTWARE\\RuneBreakers";
+  const std::wstring emptyA = baseKey + L"\\Ragnarok";
+  const std::wstring emptyB = baseKey + L"\\RenewSetup";
+
+  REQUIRE(store.PutKey(emptyA));
+  REQUIRE(store.PutKey(emptyB));
+
+  const std::wstring valueName = L"InstallPath";
+  const std::vector<uint8_t> payload = {0x41, 0x42, 0x43};
+  REQUIRE(store.PutValue(baseKey, valueName, REG_BINARY, payload.data(), static_cast<uint32_t>(payload.size())));
+
+  const auto rows = store.ExportAll();
+  REQUIRE_FALSE(rows.empty());
+
+  auto hasKeyOnly = [&](const std::wstring& key) {
+    for (const auto& r : rows) {
+      if (r.keyPath == key && r.isKeyOnly) {
+        return true;
+      }
+    }
+    return false;
+  };
+  auto hasValue = [&](const std::wstring& key, const std::wstring& name) {
+    for (const auto& r : rows) {
+      if (r.keyPath == key && !r.isKeyOnly && r.valueName == name) {
+        return true;
+      }
+    }
+    return false;
+  };
+  auto hasAnyRowForKey = [&](const std::wstring& key) {
+    for (const auto& r : rows) {
+      if (r.keyPath == key) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  CHECK(hasKeyOnly(baseKey));
+  CHECK(hasKeyOnly(emptyA));
+  CHECK(hasKeyOnly(emptyB));
+  CHECK(hasValue(baseKey, valueName));
+
+  // Creating a key/value under HKLM\SOFTWARE\... should not implicitly create/export HKLM\SOFTWARE.
+  CHECK_FALSE(hasAnyRowForKey(L"HKLM"));
+  CHECK_FALSE(hasAnyRowForKey(L"HKLM\\SOFTWARE"));
+}

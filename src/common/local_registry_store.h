@@ -46,6 +46,7 @@ public:
 
   struct ExportRow {
     std::wstring keyPath;
+    bool isKeyOnly = false;
     std::wstring valueName;
     uint32_t type = 0;
     std::vector<uint8_t> data;
