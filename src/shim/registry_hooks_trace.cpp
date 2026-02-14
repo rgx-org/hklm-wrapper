@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <mutex>
 #include <vector>
@@ -17,6 +18,40 @@ std::vector<std::wstring> g_debugTokens;
 HANDLE g_debugPipe = INVALID_HANDLE_VALUE;
 std::mutex g_debugPipeMutex;
 thread_local int g_internalDispatchDepth = 0;
+
+bool ApiUsesAnsiStrings(const wchar_t* apiName) {
+  if (!apiName) {
+    return false;
+  }
+  size_t len = wcslen(apiName);
+  if (len == 0) {
+    return false;
+  }
+  return apiName[len - 1] == L'A';
+}
+
+std::wstring AnsiBytesToWideBestEffort(const char* bytes, int len) {
+  if (!bytes || len <= 0) {
+    return {};
+  }
+
+  // Prefer strict conversion when supported; fall back to Windows' default substitution behavior.
+  const DWORD flagsToTry[] = {MB_ERR_INVALID_CHARS, 0};
+  for (DWORD flags : flagsToTry) {
+    int needed = MultiByteToWideChar(CP_ACP, flags, bytes, len, nullptr, 0);
+    if (needed <= 0) {
+      continue;
+    }
+    std::wstring out;
+    out.resize((size_t)needed);
+    if (MultiByteToWideChar(CP_ACP, flags, bytes, len, out.data(), needed) <= 0) {
+      continue;
+    }
+    return out;
+  }
+
+  return {};
+}
 
 std::wstring TrimCopy(const std::wstring& value) {
   size_t begin = 0;
@@ -286,7 +321,7 @@ std::wstring FormatValuePreview(DWORD type, const BYTE* data, DWORD cbData) {
   return L"hex:" + HexPreview(data, cbData);
 }
 
-std::wstring FormatValueForTrace(bool typeKnown, DWORD type, const BYTE* data, DWORD cbData) {
+std::wstring FormatValueForTrace(bool typeKnown, DWORD type, const BYTE* data, DWORD cbData, bool ansiStrings) {
   if (!data || cbData == 0) {
     return L"<empty>";
   }
@@ -307,34 +342,75 @@ std::wstring FormatValueForTrace(bool typeKnown, DWORD type, const BYTE* data, D
   }
 
   if (type == REG_SZ || type == REG_EXPAND_SZ) {
-    const wchar_t* w = reinterpret_cast<const wchar_t*>(data);
-    size_t chars = cbData / sizeof(wchar_t);
-    size_t end = 0;
-    while (end < chars && w[end] != L'\0') {
-      end++;
+    if (ansiStrings) {
+      const char* bytes = reinterpret_cast<const char*>(data);
+      size_t end = 0;
+      while (end < cbData && bytes[end] != '\0') {
+        end++;
+      }
+      if (end == 0) {
+        return L"str:\"\"";
+      }
+      std::wstring text = AnsiBytesToWideBestEffort(bytes, (int)end);
+      if (text.empty()) {
+        return L"hex:" + HexPreview(data, cbData);
+      }
+      return L"str:\"" + SanitizeForLog(text, 512) + L"\"";
+    } else {
+      const wchar_t* w = reinterpret_cast<const wchar_t*>(data);
+      size_t chars = cbData / sizeof(wchar_t);
+      size_t end = 0;
+      while (end < chars && w[end] != L'\0') {
+        end++;
+      }
+      std::wstring text(w, w + end);
+      return L"str:\"" + SanitizeForLog(text, 512) + L"\"";
     }
-    std::wstring text(w, w + end);
-    return L"str:\"" + SanitizeForLog(text, 512) + L"\"";
   }
 
   if (type == REG_MULTI_SZ) {
-    const wchar_t* w = reinterpret_cast<const wchar_t*>(data);
-    size_t chars = cbData / sizeof(wchar_t);
-    size_t i = 0;
     std::wstring joined;
-    while (i < chars) {
-      size_t start = i;
-      while (i < chars && w[i] != L'\0') {
+    if (ansiStrings) {
+      const char* bytes = reinterpret_cast<const char*>(data);
+      size_t i = 0;
+      while (i < cbData) {
+        size_t start = i;
+        while (i < cbData && bytes[i] != '\0') {
+          i++;
+        }
+        if (i == start) {
+          break;
+        }
+        if (!joined.empty()) {
+          joined += L"|";
+        }
+        std::wstring part = AnsiBytesToWideBestEffort(bytes + start, (int)(i - start));
+        if (part.empty()) {
+          joined += L"<hex:" + HexPreview(reinterpret_cast<const BYTE*>(bytes + start), (DWORD)(i - start)) + L">";
+        } else {
+          joined += SanitizeForLog(part, 256);
+        }
+        // Skip the NUL separator.
         i++;
       }
-      if (i == start) {
-        break;
+    } else {
+      const wchar_t* w = reinterpret_cast<const wchar_t*>(data);
+      size_t chars = cbData / sizeof(wchar_t);
+      size_t i = 0;
+      while (i < chars) {
+        size_t start = i;
+        while (i < chars && w[i] != L'\0') {
+          i++;
+        }
+        if (i == start) {
+          break;
+        }
+        if (!joined.empty()) {
+          joined += L"|";
+        }
+        joined += SanitizeForLog(std::wstring(w + start, w + i), 256);
+        i++;
       }
-      if (!joined.empty()) {
-        joined += L"|";
-      }
-      joined += SanitizeForLog(std::wstring(w + start, w + i), 256);
-      i++;
     }
     if (joined.empty()) {
       joined = L"<empty>";
@@ -406,7 +482,7 @@ LONG TraceReadResultAndReturn(const wchar_t* apiName,
   if (status == ERROR_SUCCESS) {
     if (data && cbData) {
       if (cbData <= kMaxTraceDataBytes) {
-        value += L" data=" + FormatValueForTrace(typeKnown, type, data, cbData);
+        value += L" data=" + FormatValueForTrace(typeKnown, type, data, cbData, ApiUsesAnsiStrings(apiName));
       } else {
         value += L" <data_present>";
       }
@@ -441,7 +517,7 @@ LONG TraceEnumReadResultAndReturn(const wchar_t* apiName,
   if (status == ERROR_SUCCESS) {
     if (data && cbData) {
       if (cbData <= kMaxTraceDataBytes) {
-        detail += L" data=" + FormatValueForTrace(typeKnown, type, data, cbData);
+        detail += L" data=" + FormatValueForTrace(typeKnown, type, data, cbData, ApiUsesAnsiStrings(apiName));
       } else {
         detail += L" <data_present>";
       }
