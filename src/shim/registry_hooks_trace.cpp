@@ -354,13 +354,22 @@ void TraceApiEvent(const wchar_t* apiName,
     return;
   }
 
+  SYSTEMTIME localTime{};
+  GetLocalTime(&localTime);
+  const std::wstring ts = L"(" +
+                          std::to_wstring((unsigned long)localTime.wHour / 10) + std::to_wstring((unsigned long)localTime.wHour % 10) + L":" +
+                          std::to_wstring((unsigned long)localTime.wMinute / 10) + std::to_wstring((unsigned long)localTime.wMinute % 10) + L":" +
+                          std::to_wstring((unsigned long)localTime.wSecond / 10) + std::to_wstring((unsigned long)localTime.wSecond % 10) + L"." +
+                          (localTime.wMilliseconds < 100 ? (localTime.wMilliseconds < 10 ? L"00" : L"0") : L"") +
+                          std::to_wstring((unsigned long)localTime.wMilliseconds) + L")";
+
   std::lock_guard<std::mutex> lock(g_debugPipeMutex);
   EnsureDebugPipeConnected();
   if (g_debugPipe == INVALID_HANDLE_VALUE) {
     return;
   }
 
-  const std::wstring lineW = L"[" + std::to_wstring((unsigned long)GetCurrentProcessId()) + L":" +
+  const std::wstring lineW = ts + L" [" + std::to_wstring((unsigned long)GetCurrentProcessId()) + L":" +
                              std::to_wstring((unsigned long)GetCurrentThreadId()) + L"] api=" +
                              (apiName ? std::wstring(apiName) : L"Reg?") + L" op=" +
                              (opType ? std::wstring(opType) : L"call") + L" key=\"" +
