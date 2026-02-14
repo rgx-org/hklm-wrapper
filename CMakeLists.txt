@@ -163,6 +163,8 @@ else()
 
   add_executable(hklmreg
     src/hklmreg/main.cpp
+    src/hklmreg/reg_file.cpp
+    src/hklmreg/reg_file.h
   )
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_options(hklmreg PRIVATE -municode)

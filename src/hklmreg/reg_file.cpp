@@ -2,6 +2,7 @@
 
 #include "common/utf8.h"
 
+#include <algorithm>
 #include <cstring>
 #include <cwctype>
 #include <map>
