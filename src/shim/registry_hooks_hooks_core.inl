@@ -10,6 +10,7 @@ LONG WINAPI Hook_RegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions, REG
 
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
+    BypassGuard guard;
     return fpRegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
   }
   std::wstring rawSub;
@@ -19,6 +20,7 @@ LONG WINAPI Hook_RegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions, REG
   }
   std::wstring sub = rawSub.empty() ? L"" : CanonicalizeSubKey(rawSub);
   if (IsHKLMRoot(hKey) && sub.empty()) {
+    BypassGuard guard;
     return fpRegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
   }
   std::wstring full = base.empty() ? (sub.empty() ? L"(native)" : sub) : (sub.empty() ? base : JoinKeyPath(base, sub));
@@ -89,6 +91,7 @@ LONG WINAPI Hook_RegCreateKeyExW(HKEY hKey,
 
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
+    BypassGuard guard;
     return fpRegCreateKeyExW(
         hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
   }
@@ -99,6 +102,7 @@ LONG WINAPI Hook_RegCreateKeyExW(HKEY hKey,
   }
   std::wstring sub = rawSub.empty() ? L"" : CanonicalizeSubKey(rawSub);
   if (IsHKLMRoot(hKey) && sub.empty()) {
+    BypassGuard guard;
     return fpRegCreateKeyExW(
         hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
   }
@@ -159,6 +163,7 @@ LONG WINAPI Hook_RegCloseKey(HKEY hKey) {
     return ERROR_SUCCESS;
   }
   UnregisterRealKey(hKey);
+  BypassGuard guard;
   return fpRegCloseKey(hKey);
 }
 
@@ -173,6 +178,7 @@ LONG WINAPI Hook_RegSetValueExW(HKEY hKey,
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
   if (keyPath.empty()) {
+    BypassGuard guard;
     return fpRegSetValueExW(hKey, lpValueName, Reserved, dwType, lpData, cbData);
   }
   std::wstring valueName;
@@ -213,7 +219,11 @@ LONG WINAPI Hook_RegQueryValueExW(HKEY hKey,
   if (keyPath.empty()) {
     DWORD typeLocal = 0;
     LPDWORD typeOut = lpType ? lpType : &typeLocal;
-    LONG rc = fpRegQueryValueExW(hKey, lpValueName, lpReserved, typeOut, lpData, lpcbData);
+    LONG rc = ERROR_GEN_FAILURE;
+    {
+      BypassGuard guard;
+      rc = fpRegQueryValueExW(hKey, lpValueName, lpReserved, typeOut, lpData, lpcbData);
+    }
     DWORD cb = lpcbData ? *lpcbData : 0;
     const BYTE* outData = (rc == ERROR_SUCCESS && lpData && lpcbData) ? lpData : nullptr;
     return TraceReadResultAndReturn(
@@ -291,12 +301,146 @@ LONG WINAPI Hook_RegQueryValueExW(HKEY hKey,
       L"RegQueryValueExW", keyPath, valueName, rc, true, *typeOut, outData, cb, lpData == nullptr);
 }
 
+static bool TypeAllowedByRrfMask(DWORD storedType, DWORD mask) {
+  if (mask == 0 || mask == RRF_RT_ANY) {
+    return true;
+  }
+  switch (storedType) {
+    case REG_NONE:
+      return (mask & RRF_RT_REG_NONE) != 0;
+    case REG_SZ:
+      return (mask & RRF_RT_REG_SZ) != 0;
+    case REG_EXPAND_SZ:
+      return (mask & RRF_RT_REG_EXPAND_SZ) != 0;
+    case REG_BINARY:
+      return (mask & RRF_RT_REG_BINARY) != 0;
+    case REG_DWORD:
+      return (mask & RRF_RT_REG_DWORD) != 0;
+    case REG_MULTI_SZ:
+      return (mask & RRF_RT_REG_MULTI_SZ) != 0;
+    case REG_QWORD:
+      return (mask & RRF_RT_REG_QWORD) != 0;
+    default:
+      return false;
+  }
+}
+
+LSTATUS WINAPI Hook_RegGetValueW(HKEY hKey,
+                                 LPCWSTR lpSubKey,
+                                 LPCWSTR lpValue,
+                                 DWORD dwFlags,
+                                 LPDWORD pdwType,
+                                 PVOID pvData,
+                                 LPDWORD pcbData) {
+  if (g_bypass) {
+    return fpRegGetValueW(hKey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+  }
+
+  std::wstring base = KeyPathFromHandle(hKey);
+  if (base.empty()) {
+    DWORD typeLocal = 0;
+    LPDWORD typeOut = pdwType ? pdwType : &typeLocal;
+    LSTATUS rc = ERROR_GEN_FAILURE;
+    {
+      BypassGuard guard;
+      rc = fpRegGetValueW(hKey, lpSubKey, lpValue, dwFlags, typeOut, pvData, pcbData);
+    }
+    DWORD cb = pcbData ? *pcbData : 0;
+    const BYTE* outData = (rc == ERROR_SUCCESS && pvData && pcbData) ? reinterpret_cast<const BYTE*>(pvData) : nullptr;
+    return TraceReadResultAndReturn(L"RegGetValueW", base, L"", rc, true, *typeOut, outData, cb, pvData == nullptr);
+  }
+
+  std::wstring subRaw;
+  if (!TryReadWideString(lpSubKey, subRaw)) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  std::wstring sub = subRaw.empty() ? L"" : CanonicalizeSubKey(subRaw);
+  std::wstring full = sub.empty() ? base : JoinKeyPath(base, sub);
+
+  std::wstring valueName;
+  if (!TryReadWideString(lpValue, valueName)) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  TraceApiEvent(L"RegGetValueW", L"query_value", full, valueName.empty() ? L"(Default)" : valueName, L"-");
+
+  EnsureStoreOpen();
+  {
+    std::lock_guard<std::mutex> lock(g_storeMutex);
+    auto v = g_store.GetValue(full, valueName);
+    if (v.has_value()) {
+      if (v->isDeleted) {
+        return TraceReadResultAndReturn(L"RegGetValueW", full, valueName, ERROR_FILE_NOT_FOUND, false, REG_NONE, nullptr, 0, false);
+      }
+
+      const DWORD storedType = (DWORD)v->type;
+      const DWORD typeMask = (dwFlags & 0x0000FFFF);
+      if (!TypeAllowedByRrfMask(storedType, typeMask)) {
+        return TraceReadResultAndReturn(L"RegGetValueW", full, valueName, ERROR_UNSUPPORTED_TYPE, true, storedType, nullptr, 0, false);
+      }
+
+      if (pdwType) {
+        *pdwType = storedType;
+      }
+      if (!pcbData) {
+        return TraceReadResultAndReturn(L"RegGetValueW", full, valueName, ERROR_INVALID_PARAMETER, true, storedType, nullptr, 0, false);
+      }
+
+      DWORD needed = (DWORD)v->data.size();
+      if (!pvData) {
+        *pcbData = needed;
+        return TraceReadResultAndReturn(L"RegGetValueW", full, valueName, ERROR_SUCCESS, true, storedType, nullptr, needed, true);
+      }
+      if (*pcbData < needed) {
+        *pcbData = needed;
+        return TraceReadResultAndReturn(L"RegGetValueW", full, valueName, ERROR_MORE_DATA, true, storedType, nullptr, needed, false);
+      }
+      if (needed) {
+        std::memcpy(pvData, v->data.data(), needed);
+      }
+      *pcbData = needed;
+      return TraceReadResultAndReturn(L"RegGetValueW",
+                                      full,
+                                      valueName,
+                                      ERROR_SUCCESS,
+                                      true,
+                                      storedType,
+                                      reinterpret_cast<const BYTE*>(pvData),
+                                      needed,
+                                      false);
+    }
+  }
+
+  // Fall back to the real registry if possible (never pass virtual handles).
+  HKEY realParent = RealHandleForFallback(hKey);
+  DWORD typeLocal = 0;
+  LPDWORD typeOut = pdwType ? pdwType : &typeLocal;
+  LSTATUS rc = ERROR_FILE_NOT_FOUND;
+  {
+    BypassGuard guard;
+    if (realParent) {
+      rc = fpRegGetValueW(realParent, lpSubKey, lpValue, dwFlags, typeOut, pvData, pcbData);
+    } else {
+      std::wstring absSub;
+      if (full.rfind(L"HKLM\\", 0) == 0) {
+        absSub = full.substr(5);
+      }
+      if (!absSub.empty()) {
+        rc = fpRegGetValueW(HKEY_LOCAL_MACHINE, absSub.c_str(), lpValue, dwFlags, typeOut, pvData, pcbData);
+      }
+    }
+  }
+  DWORD cb = pcbData ? *pcbData : 0;
+  const BYTE* outData = (rc == ERROR_SUCCESS && pvData && pcbData) ? reinterpret_cast<const BYTE*>(pvData) : nullptr;
+  return TraceReadResultAndReturn(L"RegGetValueW", full, valueName, rc, true, *typeOut, outData, cb, pvData == nullptr);
+}
+
 LONG WINAPI Hook_RegDeleteValueW(HKEY hKey, LPCWSTR lpValueName) {
   if (g_bypass) {
     return fpRegDeleteValueW(hKey, lpValueName);
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
   if (keyPath.empty()) {
+    BypassGuard guard;
     return fpRegDeleteValueW(hKey, lpValueName);
   }
   std::wstring valueName;
@@ -321,6 +465,7 @@ LONG WINAPI Hook_RegDeleteKeyW(HKEY hKey, LPCWSTR lpSubKey) {
   }
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
+    BypassGuard guard;
     return fpRegDeleteKeyW(hKey, lpSubKey);
   }
   std::wstring subRaw;

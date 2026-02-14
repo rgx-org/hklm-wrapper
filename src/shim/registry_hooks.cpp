@@ -68,8 +68,12 @@ bool ShouldDisableHooks() {
 }
 
 struct BypassGuard {
-  BypassGuard() { g_bypass = true; }
-  ~BypassGuard() { g_bypass = false; }
+  bool prev = false;
+  BypassGuard() {
+    prev = g_bypass;
+    g_bypass = true;
+  }
+  ~BypassGuard() { g_bypass = prev; }
 };
 
 bool IsVirtual(HKEY h) {
@@ -118,6 +122,7 @@ void EnsureStoreOpen() {
 decltype(&RegOpenKeyExW) fpRegOpenKeyExW = nullptr;
 decltype(&RegCreateKeyExW) fpRegCreateKeyExW = nullptr;
 decltype(&RegCloseKey) fpRegCloseKey = nullptr;
+decltype(&RegGetValueW) fpRegGetValueW = nullptr;
 decltype(&RegSetValueExW) fpRegSetValueExW = nullptr;
 decltype(&RegQueryValueExW) fpRegQueryValueExW = nullptr;
 decltype(&RegDeleteValueW) fpRegDeleteValueW = nullptr;
@@ -151,6 +156,7 @@ decltype(&RegSetValueExA) fpRegSetValueExA = nullptr;
 decltype(&RegQueryValueExA) fpRegQueryValueExA = nullptr;
 decltype(&RegDeleteValueA) fpRegDeleteValueA = nullptr;
 decltype(&RegDeleteKeyA) fpRegDeleteKeyA = nullptr;
+decltype(&RegGetValueA) fpRegGetValueA = nullptr;
 
 LONG WINAPI Hook_RegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOptions, REGSAM samDesired, PHKEY phkResult);
 LONG WINAPI Hook_RegCreateKeyExA(HKEY hKey,
@@ -162,6 +168,22 @@ LONG WINAPI Hook_RegCreateKeyExA(HKEY hKey,
                                  const LPSECURITY_ATTRIBUTES lpSecurityAttributes,
                                  PHKEY phkResult,
                                  LPDWORD lpdwDisposition);
+
+LSTATUS WINAPI Hook_RegGetValueW(HKEY hKey,
+                                 LPCWSTR lpSubKey,
+                                 LPCWSTR lpValue,
+                                 DWORD dwFlags,
+                                 LPDWORD pdwType,
+                                 PVOID pvData,
+                                 LPDWORD pcbData);
+
+LSTATUS WINAPI Hook_RegGetValueA(HKEY hKey,
+                                 LPCSTR lpSubKey,
+                                 LPCSTR lpValue,
+                                 DWORD dwFlags,
+                                 LPDWORD pdwType,
+                                 PVOID pvData,
+                                 LPDWORD pcbData);
 
 std::wstring KeyPathFromHandle(HKEY hKey) {
   if (auto* vk = AsVirtual(hKey)) {
@@ -440,20 +462,16 @@ static bool CreateHookApiTyped(LPCWSTR moduleName, LPCSTR procName, TDetour deto
 
 template <typename TDetour, typename TOriginal>
 static bool CreateHookApiTypedWithFallback(LPCSTR procName, TDetour detour, TOriginal* original) {
-  // Newer Windows/MSVC SDKs may bind registry imports via API-set DLLs and/or
-  // forward to KernelBase. Hook KernelBase first (catches forwarders), then fall
-  // back to advapi32 and the common API-set module.
+  // Advapi32-only hooking: empirically the most stable option for wrapped apps.
+  // Hooking additional registry provider modules has caused early process
+  // failures in real-world wrapped apps, so we intentionally keep this narrow.
   static constexpr LPCWSTR kModules[] = {
-      L"kernelbase",
-      L"KernelBase.dll",
       L"advapi32",
       L"Advapi32.dll",
-      L"api-ms-win-core-registry-l1-1-0",
-      L"api-ms-win-core-registry-l1-1-0.dll",
   };
 
   // Important: multiple call sites in a process can bind the same registry API
-  // via different modules (Advapi32 vs KernelBase vs API-set forwarders). If we
+  // via different module names (e.g. "advapi32" vs "Advapi32.dll"). If we
   // only hook the first module that happens to resolve on the current system,
   // a virtual HKEY created by a hooked entry point can later be consumed by an
   // unhooked entry point, leading to an access violation inside the real
@@ -494,6 +512,7 @@ bool InstallRegistryHooks() {
   ok &= CreateHookApiTypedWithFallback("RegOpenKeyExW", &Hook_RegOpenKeyExW, &fpRegOpenKeyExW);
   ok &= CreateHookApiTypedWithFallback("RegCreateKeyExW", &Hook_RegCreateKeyExW, &fpRegCreateKeyExW);
   ok &= CreateHookApiTypedWithFallback("RegCloseKey", &Hook_RegCloseKey, &fpRegCloseKey);
+  ok &= CreateHookApiTypedWithFallback("RegGetValueW", &Hook_RegGetValueW, &fpRegGetValueW);
   ok &= CreateHookApiTypedWithFallback("RegSetValueExW", &Hook_RegSetValueExW, &fpRegSetValueExW);
   ok &= CreateHookApiTypedWithFallback("RegQueryValueExW", &Hook_RegQueryValueExW, &fpRegQueryValueExW);
   ok &= CreateHookApiTypedWithFallback("RegDeleteValueW", &Hook_RegDeleteValueW, &fpRegDeleteValueW);
@@ -520,6 +539,8 @@ bool InstallRegistryHooks() {
     ok &= CreateHookApiTypedWithFallback("RegQueryValueExA", &Hook_RegQueryValueExA, &fpRegQueryValueExA);
     ok &= CreateHookApiTypedWithFallback("RegDeleteValueA", &Hook_RegDeleteValueA, &fpRegDeleteValueA);
     ok &= CreateHookApiTypedWithFallback("RegDeleteKeyA", &Hook_RegDeleteKeyA, &fpRegDeleteKeyA);
+
+    ok &= CreateHookApiTypedWithFallback("RegGetValueA", &Hook_RegGetValueA, &fpRegGetValueA);
 
     ok &= CreateHookApiTypedWithFallback("RegOpenKeyA", &Hook_RegOpenKeyA, &fpRegOpenKeyA);
     ok &= CreateHookApiTypedWithFallback("RegCreateKeyA", &Hook_RegCreateKeyA, &fpRegCreateKeyA);

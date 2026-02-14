@@ -37,6 +37,7 @@ LONG WINAPI Hook_RegSetKeyValueW(HKEY hKey,
   }
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
+    BypassGuard guard;
     return fpRegSetKeyValueW ? fpRegSetKeyValueW(hKey, lpSubKey, lpValueName, dwType, lpData, cbData) : ERROR_CALL_NOT_IMPLEMENTED;
   }
   std::wstring subRaw;
@@ -77,6 +78,7 @@ LONG WINAPI Hook_RegSetKeyValueA(HKEY hKey,
   }
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
+    BypassGuard guard;
     return fpRegSetKeyValueA ? fpRegSetKeyValueA(hKey, lpSubKey, lpValueName, dwType, lpData, cbData) : ERROR_CALL_NOT_IMPLEMENTED;
   }
   std::wstring subRaw;
@@ -124,7 +126,11 @@ LONG WINAPI Hook_RegEnumValueW(HKEY hKey,
   if (keyPath.empty()) {
     DWORD typeLocal = 0;
     LPDWORD typeOut = lpType ? lpType : &typeLocal;
-    LONG rc = fpRegEnumValueW(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, typeOut, lpData, lpcbData);
+    LONG rc = ERROR_GEN_FAILURE;
+    {
+      BypassGuard guard;
+      rc = fpRegEnumValueW(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, typeOut, lpData, lpcbData);
+    }
     std::wstring outName;
     if (rc == ERROR_SUCCESS && lpValueName && lpcchValueName) {
       outName.assign(lpValueName, lpValueName + *lpcchValueName);
@@ -224,7 +230,11 @@ LONG WINAPI Hook_RegEnumValueA(HKEY hKey,
   if (keyPath.empty()) {
     DWORD typeLocal = 0;
     LPDWORD typeOut = lpType ? lpType : &typeLocal;
-    LONG rc = fpRegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, typeOut, lpData, lpcbData);
+    LONG rc = ERROR_GEN_FAILURE;
+    {
+      BypassGuard guard;
+      rc = fpRegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, typeOut, lpData, lpcbData);
+    }
     std::wstring outName;
     if (rc == ERROR_SUCCESS && lpValueName && lpcchValueName) {
       if (!TryAnsiToWideString(lpValueName, outName)) {
@@ -329,6 +339,7 @@ LONG WINAPI Hook_RegEnumKeyExW(HKEY hKey,
   std::wstring keyPath = KeyPathFromHandle(hKey);
   TraceApiEvent(L"RegEnumKeyExW", L"enum_key", keyPath, L"index", std::to_wstring(dwIndex));
   if (keyPath.empty()) {
+    BypassGuard guard;
     return fpRegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
   }
   if (lpReserved) {
@@ -379,6 +390,7 @@ LONG WINAPI Hook_RegEnumKeyExA(HKEY hKey,
   std::wstring keyPath = KeyPathFromHandle(hKey);
   TraceApiEvent(L"RegEnumKeyExA", L"enum_key", keyPath, L"index", std::to_wstring(dwIndex));
   if (keyPath.empty()) {
+    BypassGuard guard;
     return fpRegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
   }
   if (lpReserved) {
@@ -461,6 +473,7 @@ LONG WINAPI Hook_RegQueryInfoKeyW(HKEY hKey,
   std::wstring keyPath = KeyPathFromHandle(hKey);
   TraceApiEvent(L"RegQueryInfoKeyW", L"query_info", keyPath, L"-", L"-");
   if (keyPath.empty()) {
+    BypassGuard guard;
     return fpRegQueryInfoKeyW(hKey,
                               lpClass,
                               lpcchClass,
@@ -560,6 +573,7 @@ LONG WINAPI Hook_RegQueryInfoKeyA(HKEY hKey,
   std::wstring keyPath = KeyPathFromHandle(hKey);
   TraceApiEvent(L"RegQueryInfoKeyA", L"query_info", keyPath, L"-", L"-");
   if (keyPath.empty()) {
+    BypassGuard guard;
     return fpRegQueryInfoKeyA(hKey,
                               lpClass,
                               lpcchClass,
@@ -594,6 +608,7 @@ LONG WINAPI Hook_RegSetValueW(HKEY hKey, LPCWSTR lpSubKey, DWORD dwType, LPCWSTR
   }
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
+    BypassGuard guard;
     return fpRegSetValueW(hKey, lpSubKey, dwType, lpData, cbData);
   }
   std::wstring subRaw;
@@ -626,6 +641,7 @@ LONG WINAPI Hook_RegSetValueA(HKEY hKey, LPCSTR lpSubKey, DWORD dwType, LPCSTR l
   }
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
+    BypassGuard guard;
     return fpRegSetValueA(hKey, lpSubKey, dwType, lpData, cbData);
   }
   std::wstring subRaw;
@@ -661,7 +677,11 @@ LONG WINAPI Hook_RegQueryValueW(HKEY hKey, LPCWSTR lpSubKey, LPWSTR lpData, PLON
   }
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
-    LONG rc = fpRegQueryValueW(hKey, lpSubKey, lpData, lpcbData);
+    LONG rc = ERROR_GEN_FAILURE;
+    {
+      BypassGuard guard;
+      rc = fpRegQueryValueW(hKey, lpSubKey, lpData, lpcbData);
+    }
     DWORD cb = lpcbData ? (DWORD)*lpcbData : 0;
     const BYTE* outData = (rc == ERROR_SUCCESS && lpData && lpcbData) ? reinterpret_cast<const BYTE*>(lpData) : nullptr;
     return TraceReadResultAndReturn(
@@ -747,7 +767,11 @@ LONG WINAPI Hook_RegQueryValueA(HKEY hKey, LPCSTR lpSubKey, LPSTR lpData, PLONG 
   }
   std::wstring base = KeyPathFromHandle(hKey);
   if (base.empty()) {
-    LONG rc = fpRegQueryValueA(hKey, lpSubKey, lpData, lpcbData);
+    LONG rc = ERROR_GEN_FAILURE;
+    {
+      BypassGuard guard;
+      rc = fpRegQueryValueA(hKey, lpSubKey, lpData, lpcbData);
+    }
     DWORD cb = lpcbData ? (DWORD)*lpcbData : 0;
     const BYTE* outData = (rc == ERROR_SUCCESS && lpData && lpcbData) ? reinterpret_cast<const BYTE*>(lpData) : nullptr;
     return TraceReadResultAndReturn(
