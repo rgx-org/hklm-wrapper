@@ -50,6 +50,7 @@ static void SafeRelease(T*& p) {
 static std::atomic<bool> g_loggedConfig{false};
 
 static std::atomic<bool> g_active{false};
+static std::atomic<bool> g_hooksInstalled{false};
 static std::atomic<bool> g_stopInitThread{false};
 static HANDLE g_initThread = nullptr;
 
@@ -141,7 +142,7 @@ static void ProbeLogCommonGraphicsModules() {
   const bool wasDDraw = g_seenDDraw.load(std::memory_order_acquire);
   ProbeLogModuleIfPresent(L"ddraw.dll", g_seenDDraw);
   if (!wasDDraw && g_seenDDraw.load(std::memory_order_acquire)) {
-    D3D9Tracef("ddraw.dll detected (dgVoodoo DDraw path likely); enable uses DirectDraw hook path as well");
+    D3D9Tracef("ddraw.dll detected (DirectDraw in use)");
   }
   ProbeLogModuleIfPresent(L"dxgi.dll", g_seenDXGI);
   ProbeLogModuleIfPresent(L"d3d11.dll", g_seenD3D11);
@@ -217,6 +218,40 @@ static void ProbeDumpInterestingModulesOnce() {
   } while (Module32NextW(snap, &me));
 
   CloseHandle(snap);
+}
+
+static bool IsDgVoodooPresent() {
+  static std::atomic<int> cached{-1};
+  const int v = cached.load(std::memory_order_acquire);
+  if (v == 0) {
+    return false;
+  }
+  if (v == 1) {
+    return true;
+  }
+
+  const DWORD pid = GetCurrentProcessId();
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+  if (snap == INVALID_HANDLE_VALUE) {
+    cached.store(0, std::memory_order_release);
+    return false;
+  }
+
+  MODULEENTRY32W me{};
+  me.dwSize = sizeof(me);
+  bool found = false;
+  if (Module32FirstW(snap, &me)) {
+    do {
+      if (ContainsNoCase(me.szModule, L"dgvoodoo") || ContainsNoCase(me.szExePath, L"dgvoodoo")) {
+        found = true;
+        break;
+      }
+    } while (Module32NextW(snap, &me));
+  }
+  CloseHandle(snap);
+
+  cached.store(found ? 1 : 0, std::memory_order_release);
+  return found;
 }
 
 static std::mutex g_stateMutex;
@@ -977,6 +1012,15 @@ static bool InstallD3D9ExportsHooksOnce() {
     return true;
   }
 
+  if (IsDgVoodooPresent()) {
+    static std::atomic<bool> logged{false};
+    bool expected = false;
+    if (logged.compare_exchange_strong(expected, true)) {
+      D3D9Tracef("dgVoodoo detected; shim D3D9 surface scaling hooks disabled (use dgVoodoo AddOn)");
+    }
+    return true;
+  }
+
   const SurfaceScaleConfig& cfg = GetSurfaceScaleConfig();
   D3D9Tracef("surface scaling hooks enabled (scale=%.3f method=%ls)", cfg.factor, SurfaceScaleMethodToString(cfg.method));
 
@@ -1005,6 +1049,7 @@ static bool InstallD3D9ExportsHooksOnce() {
     ReleaseMinHook();
     return false;
   }
+  g_hooksInstalled.store(true, std::memory_order_release);
   D3D9Tracef("Direct3DCreate9 export hooks installed");
   return true;
 }
@@ -1043,6 +1088,21 @@ bool InstallD3D9SurfaceDoublingHooks() {
   LogConfigOnceIfNeeded();
   if (!IsScalingEnabled()) {
     g_active.store(false, std::memory_order_release);
+    g_hooksInstalled.store(false, std::memory_order_release);
+    return true;
+  }
+
+  // dgVoodoo (and similar wrappers) can route D3D9 through other backends.
+  // The shim's present/backbuffer scaling hooks are fragile there; prefer a
+  // dgVoodoo AddOn that can see the real backend resources.
+  if (IsDgVoodooPresent()) {
+    static std::atomic<bool> logged{false};
+    bool expected = false;
+    if (logged.compare_exchange_strong(expected, true)) {
+      D3D9Tracef("dgVoodoo detected; shim D3D9 surface scaling disabled (use dgVoodoo AddOn)");
+    }
+    g_active.store(false, std::memory_order_release);
+    g_hooksInstalled.store(false, std::memory_order_release);
     return true;
   }
 
@@ -1066,13 +1126,15 @@ bool InstallD3D9SurfaceDoublingHooks() {
 }
 
 bool AreD3D9SurfaceDoublingHooksActive() {
-  return g_active.load(std::memory_order_acquire);
+  return g_hooksInstalled.load(std::memory_order_acquire);
 }
 
 void RemoveD3D9SurfaceDoublingHooks() {
   if (!g_active.exchange(false, std::memory_order_acq_rel)) {
     return;
   }
+
+  g_hooksInstalled.store(false, std::memory_order_release);
 
   g_stopInitThread.store(true, std::memory_order_release);
   HANDLE th = g_initThread;

@@ -48,6 +48,46 @@ static bool ParseSurfaceScaleConfigFromCommandLine(SurfaceScaleConfig* out) {
   }
   *out = SurfaceScaleConfig{};
 
+  // Prefer environment variable overrides when present (set by the wrapper).
+  // This lets other injected components (like a dgVoodoo AddOn) read the same
+  // scale settings even if command-line parsing is impacted by third-party code.
+  {
+    wchar_t scaleBuf[128] = {};
+    DWORD n = GetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE", scaleBuf, (DWORD)(sizeof(scaleBuf) / sizeof(scaleBuf[0])));
+    if (n && n < (DWORD)(sizeof(scaleBuf) / sizeof(scaleBuf[0]))) {
+      scaleBuf[n] = L'\0';
+      out->scaleSpecified = true;
+      out->scaleRaw = scaleBuf;
+      double v = 0.0;
+      if (TryParseDouble(out->scaleRaw, &v) && (v >= 1.1 && v <= 100.0)) {
+        out->factor = v;
+        out->enabled = true;
+        out->scaleValid = true;
+      } else {
+        out->scaleValid = false;
+      }
+    }
+  }
+  {
+    wchar_t methodBuf[128] = {};
+    DWORD n = GetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE_METHOD", methodBuf, (DWORD)(sizeof(methodBuf) / sizeof(methodBuf[0])));
+    if (n && n < (DWORD)(sizeof(methodBuf) / sizeof(methodBuf[0]))) {
+      methodBuf[n] = L'\0';
+      out->methodSpecified = true;
+      out->methodRaw = methodBuf;
+      const std::wstring lower = ToLowerCopy(out->methodRaw);
+      if (lower == L"point") {
+        out->method = SurfaceScaleMethod::kPoint;
+      } else if (lower == L"bilinear") {
+        out->method = SurfaceScaleMethod::kBilinear;
+      } else if (lower == L"bicubic") {
+        out->method = SurfaceScaleMethod::kBicubic;
+      } else {
+        out->methodValid = false;
+      }
+    }
+  }
+
   int argc = 0;
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv || argc <= 0) {

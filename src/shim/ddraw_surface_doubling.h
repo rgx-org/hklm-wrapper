@@ -2,8 +2,11 @@
 
 namespace hklmwrap {
 
-// DirectDraw-based implementation of surface doubling (for titles that go
-// through dgVoodoo's ddraw.dll rather than d3d9.dll).
+// DirectDraw-based implementation of surface doubling (system ddraw.dll paths).
+//
+// Note: if the process is using an app-local/wrapper ddraw.dll (dgVoodoo/etc),
+// the shim intentionally disables this hook. Use a dgVoodoo AddOn for scaling
+// in wrapper-backed paths.
 //
 // Controlled by target process command-line options:
 //   --scale <1.1-100>

@@ -82,6 +82,8 @@ Staging helper:
 scripts\build-windows-msvc-x86.cmd
 ```
 
+If `third_party/dgvoodoo_addon_sdk` is present (with `Inc/Addon` headers and `Lib/x86/dgVoodooAddon.lib`), the staging helper auto-enables the dgVoodoo AddOn build and stages `SampleAddon.dll` into `stage/bin`.
+
 ## Tests
 
 ### Native host tests (macOS/Linux)
@@ -130,6 +132,32 @@ hklm_wrapper.exe --db .\HKLM.sqlite C:\Path\To\TargetApp.exe
 hklm_wrapper_cli.exe --debug RegOpenKey,RegQueryValue C:\Path\To\TargetApp.exe
 hklm_wrapper_cli.exe --debug all C:\Path\To\TargetApp.exe
 ```
+
+## dgVoodoo (scaling)
+
+This repo has two scaling approaches:
+
+- **Shim hooks (default)**: best-effort surface scaling for *native* D3D9 and system DirectDraw paths.
+- **dgVoodoo AddOn (recommended for dgVoodoo)**: intended path when running under dgVoodoo, where the wrapper may render through non-D3D9 backends (e.g. D3D12) and backbuffer/swapchain hooking is fragile.
+
+As of Feb 2026, the previous DXGI/D3D11 "post-filter" hook that attempted to improve dgVoodoo wrapper output has been removed. If the injected shim detects an app-local/wrapper `ddraw.dll` or dgVoodoo modules, it will intentionally **disable shim scaling** for that path and log a one-time message.
+
+### Building the dgVoodoo AddOn DLL
+
+1. Unpack the dgVoodoo SDK under:
+  - `third_party/dgvoodoo_addon_sdk/`
+  (expected layout includes `Inc/Addon` and `Lib/x86`)
+2. Configure with:
+  - `-DHKLM_WRAPPER_ENABLE_DGVOODOO_ADDON=ON`
+
+If your SDK is in a different location or you need a different arch library path, set:
+
+- `-DDGVOODOO_ADDON_SDK_DIR=<path>`
+- `-DDGVOODOO_ADDON_LIB_DIR=<path-to-Lib/x86>`
+
+The AddOn implementation scaffold lives in `src/dgvoodoo_addon/addon_main.cpp`.
+
+dgVoodoo currently loads an add-on DLL only by the fixed name `SampleAddon.dll`, typically from the same directory as the dgVoodoo graphics DLLs. The build produces `SampleAddon.dll` when the add-on target is enabled.
 
 ## hklmreg quick examples
 

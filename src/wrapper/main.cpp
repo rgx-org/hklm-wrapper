@@ -529,6 +529,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   const std::wstring shimPath = CombinePath(wrapperDir, HKLM_WRAPPER_SHIM_DLL_NAME);
   SetEnvironmentVariableW(L"HKLM_WRAPPER_DB_PATH", dbPath.c_str());
 
+  // Also export surface scaling config via environment variables so any injected
+  // components (shim, dgVoodoo add-on, etc) can read it reliably.
+  if (!scaleArg.empty()) {
+    SetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE", scaleArg.c_str());
+  }
+  if (!scaleMethodArg.empty()) {
+    SetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE_METHOD", scaleMethodArg.c_str());
+  }
+
   DebugPipeBridge debugBridge;
   HANDLE hookReadyEvent = nullptr;
   if (!debugApisCsv.empty()) {

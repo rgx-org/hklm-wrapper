@@ -7,7 +7,10 @@
 #include <MinHook.h>
 
 #include <windows.h>
+#include <unknwn.h>
 #include <ddraw.h>
+
+#include <d3d9.h>
 
 #include <atomic>
 #include <cstdarg>
@@ -18,6 +21,7 @@
 #include <algorithm>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace hklmwrap {
 namespace {
@@ -38,12 +42,75 @@ static std::atomic<bool> g_seenDDraw{false};
   static std::atomic<bool> g_loggedScaleViaFlip{false};
   static std::atomic<bool> g_loggedScaleViaBlt{false};
   static std::atomic<bool> g_loggedFilteredFallback{false};
-  static std::atomic<bool> g_loggedLockScale{false};
+
 
 static std::mutex g_stateMutex;
 static HWND g_hwnd = nullptr;
 static DWORD g_coopFlags = 0;
 static bool g_resizedOnce = false;
+
+static void Tracef(const char* fmt, ...);
+
+// 0=unknown, 1=system ddraw, 2=wrapper ddraw (dgVoodoo/etc)
+static std::atomic<int> g_ddrawModuleKind{0};
+
+static std::wstring ToLowerCopy(const std::wstring& s) {
+  std::wstring out = s;
+  for (wchar_t& ch : out) {
+    ch = (wchar_t)towlower(ch);
+  }
+  return out;
+}
+
+static bool IsLikelyWrapperDDrawDll() {
+  const int cached = g_ddrawModuleKind.load(std::memory_order_acquire);
+  if (cached == 1) {
+    return false;
+  }
+  if (cached == 2) {
+    return true;
+  }
+
+  HMODULE h = GetModuleHandleW(L"ddraw.dll");
+  if (!h) {
+    return false;
+  }
+
+  wchar_t modPathBuf[MAX_PATH] = {};
+  DWORD n = GetModuleFileNameW(h, modPathBuf, (DWORD)(sizeof(modPathBuf) / sizeof(modPathBuf[0])));
+  if (!n || n >= (DWORD)(sizeof(modPathBuf) / sizeof(modPathBuf[0]))) {
+    return false;
+  }
+  std::wstring modPath = ToLowerCopy(std::wstring(modPathBuf));
+
+  wchar_t sysDirBuf[MAX_PATH] = {};
+  UINT sn = GetSystemDirectoryW(sysDirBuf, (UINT)(sizeof(sysDirBuf) / sizeof(sysDirBuf[0])));
+  std::wstring sysDir = ToLowerCopy(std::wstring(sysDirBuf, sysDirBuf + (sn ? sn : 0)));
+  if (!sysDir.empty() && sysDir.back() != L'\\') {
+    sysDir.push_back(L'\\');
+  }
+
+  bool isSystem = false;
+  if (!sysDir.empty()) {
+    // System32\ddraw.dll
+    const std::wstring sysDdraw = sysDir + L"ddraw.dll";
+    if (modPath == sysDdraw) {
+      isSystem = true;
+    }
+  }
+
+  // If it's not exactly the system DLL (common for app-local wrappers), treat as wrapper.
+  const int kind = isSystem ? 1 : 2;
+  g_ddrawModuleKind.store(kind, std::memory_order_release);
+
+  static std::atomic<bool> logged{false};
+  bool expected = false;
+  if (logged.compare_exchange_strong(expected, true)) {
+    Tracef("ddraw.dll path: %ls (%s)", modPathBuf, isSystem ? "system" : "wrapper");
+  }
+
+  return !isSystem;
+}
 
 static LPDIRECTDRAWSURFACE7 g_primary = nullptr;
 static LPDIRECTDRAWSURFACE7 g_cachedBackbuffer = nullptr;
@@ -310,9 +377,40 @@ static bool GetPixelFormatInfoFromSurface(LPDIRECTDRAWSURFACE7 surf, PixelFormat
   const uint32_t bpp = sd.ddpfPixelFormat.dwRGBBitCount;
   if (bpp == 16) {
     info.bytesPerPixel = 2;
+    // Some wrappers report 16bpp RGB but leave masks zero. Assume 565.
+    if (info.rMask == 0 && info.gMask == 0 && info.bMask == 0) {
+      info.rMask = 0xF800;
+      info.gMask = 0x07E0;
+      info.bMask = 0x001F;
+      info.rShift = 11;
+      info.gShift = 5;
+      info.bShift = 0;
+      info.rBits = 5;
+      info.gBits = 6;
+      info.bBits = 5;
+    }
   } else if (bpp == 32) {
     info.bytesPerPixel = 4;
+    // Some wrappers report 32bpp RGB but leave masks zero. Assume XRGB8888.
+    if (info.rMask == 0 && info.gMask == 0 && info.bMask == 0) {
+      info.rMask = 0x00FF0000;
+      info.gMask = 0x0000FF00;
+      info.bMask = 0x000000FF;
+      info.aMask = 0;
+      info.rShift = 16;
+      info.gShift = 8;
+      info.bShift = 0;
+      info.rBits = 8;
+      info.gBits = 8;
+      info.bBits = 8;
+      info.aBits = 0;
+    }
   } else {
+    return false;
+  }
+
+  // If we still don't have masks/bits, bail out.
+  if (info.rMask == 0 || info.gMask == 0 || info.bMask == 0 || info.rBits == 0 || info.gBits == 0 || info.bBits == 0) {
     return false;
   }
 
@@ -329,17 +427,6 @@ static uint8_t ExpandTo8(uint32_t v, int bits) {
   }
   const uint32_t maxv = (1u << (uint32_t)bits) - 1u;
   return (uint8_t)((v * 255u + (maxv / 2u)) / maxv);
-}
-
-static uint32_t CompressFrom8(uint8_t v, int bits) {
-  if (bits <= 0) {
-    return 0;
-  }
-  if (bits >= 8) {
-    return (uint32_t)v;
-  }
-  const uint32_t maxv = (1u << (uint32_t)bits) - 1u;
-  return (uint32_t)((uint32_t)v * maxv + 127u) / 255u;
 }
 
 static void UnpackRGBA(const PixelFormatInfo& fmt, uint32_t px, uint8_t* r, uint8_t* g, uint8_t* b, uint8_t* a) {
@@ -361,17 +448,6 @@ static void UnpackRGBA(const PixelFormatInfo& fmt, uint32_t px, uint8_t* r, uint
   }
 }
 
-static uint32_t PackRGBA(const PixelFormatInfo& fmt, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-  uint32_t out = 0;
-  out |= (CompressFrom8(r, fmt.rBits) << (uint32_t)fmt.rShift) & fmt.rMask;
-  out |= (CompressFrom8(g, fmt.gBits) << (uint32_t)fmt.gShift) & fmt.gMask;
-  out |= (CompressFrom8(b, fmt.bBits) << (uint32_t)fmt.bShift) & fmt.bMask;
-  if (fmt.aMask) {
-    out |= (CompressFrom8(a, fmt.aBits) << (uint32_t)fmt.aShift) & fmt.aMask;
-  }
-  return out;
-}
-
 static uint32_t ReadPixel(const uint8_t* base, int pitch, int x, int y, int bpp) {
   const uint8_t* p = base + (ptrdiff_t)y * pitch + (ptrdiff_t)x * bpp;
   if (bpp == 4) {
@@ -380,156 +456,698 @@ static uint32_t ReadPixel(const uint8_t* base, int pitch, int x, int y, int bpp)
   return (uint32_t)(*(const uint16_t*)p);
 }
 
-static void WritePixel(uint8_t* base, int pitch, int x, int y, int bpp, uint32_t px) {
-  uint8_t* p = base + (ptrdiff_t)y * pitch + (ptrdiff_t)x * bpp;
-  if (bpp == 4) {
-    *(uint32_t*)p = px;
-  } else {
-    *(uint16_t*)p = (uint16_t)px;
-  }
-}
+// --- D3D9-based filtered scaling (hardware accelerated) ---
+//
+// DirectDraw surfaces from wrappers (e.g. dgVoodoo) can expose GetDC, but using GDI
+// StretchBlt every frame is often very slow. For bilinear/bicubic, we instead:
+//   1) Lock() the source surface (read-only)
+//   2) Convert to A8R8G8B8 in a CPU buffer
+//   3) Upload to a dynamic D3D9 texture
+//   4) Render to the game window with:
+//        - bilinear: fixed-function sampling with linear filtering
+//        - bicubic: two-pass 1D cubic filter via pixel shaders
+// If anything fails, callers fall back to point stretching.
 
-static HRESULT TryScaleViaLockBilinear(LPDIRECTDRAWSURFACE7 dstSurf,
-                                      const RECT& dstRc,
-                                      LPDIRECTDRAWSURFACE7 srcSurf,
-                                      const RECT& srcRc) {
-  if (!dstSurf || !srcSurf) {
-    return E_INVALIDARG;
-  }
-  // Clamp destination to the primary surface bounds (window can be partially off-screen).
-  DDSURFACEDESC2 dBounds{};
-  dBounds.dwSize = sizeof(dBounds);
-  if (FAILED(dstSurf->GetSurfaceDesc(&dBounds)) || dBounds.dwWidth == 0 || dBounds.dwHeight == 0) {
-    return E_FAIL;
-  }
-  RECT clampedDst = dstRc;
-  clampedDst.left = std::max<LONG>(0, clampedDst.left);
-  clampedDst.top = std::max<LONG>(0, clampedDst.top);
-  clampedDst.right = std::min<LONG>((LONG)dBounds.dwWidth, clampedDst.right);
-  clampedDst.bottom = std::min<LONG>((LONG)dBounds.dwHeight, clampedDst.bottom);
+struct ID3DBlob : public IUnknown {
+  virtual LPVOID STDMETHODCALLTYPE GetBufferPointer() = 0;
+  virtual SIZE_T STDMETHODCALLTYPE GetBufferSize() = 0;
+};
 
-  const int dstW = (int)(clampedDst.right - clampedDst.left);
-  const int dstH = (int)(clampedDst.bottom - clampedDst.top);
-  const int srcW = (int)(srcRc.right - srcRc.left);
-  const int srcH = (int)(srcRc.bottom - srcRc.top);
-  if (dstW <= 0 || dstH <= 0 || srcW <= 0 || srcH <= 0) {
-    return E_INVALIDARG;
+using Direct3DCreate9_t = IDirect3D9*(WINAPI*)(UINT);
+using D3DCompile_t = HRESULT(WINAPI*)(
+    LPCVOID pSrcData,
+    SIZE_T SrcDataSize,
+    LPCSTR pSourceName,
+    const void* pDefines,
+    void* pInclude,
+    LPCSTR pEntryPoint,
+    LPCSTR pTarget,
+    UINT Flags1,
+    UINT Flags2,
+    ID3DBlob** ppCode,
+    ID3DBlob** ppErrorMsgs);
+
+class DDrawD3D9Scaler {
+ public:
+  bool PresentScaled(LPDIRECTDRAWSURFACE7 srcSurf,
+                     const RECT& srcRect,
+                     HWND hwnd,
+                     UINT dstW,
+                     UINT dstH,
+                     SurfaceScaleMethod method) {
+    if (!srcSurf || !hwnd || dstW == 0 || dstH == 0) {
+      return false;
+    }
+    if (method != SurfaceScaleMethod::kBilinear && method != SurfaceScaleMethod::kBicubic) {
+      return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!EnsureDeviceUnlocked(hwnd, dstW, dstH)) {
+      return false;
+    }
+
+    // Clamp srcRect to the source surface bounds.
+    DDSURFACEDESC2 sd{};
+    sd.dwSize = sizeof(sd);
+    if (FAILED(srcSurf->GetSurfaceDesc(&sd)) || sd.dwWidth == 0 || sd.dwHeight == 0) {
+      return false;
+    }
+
+    RECT rc = srcRect;
+    rc.left = std::max<LONG>(0, rc.left);
+    rc.top = std::max<LONG>(0, rc.top);
+    rc.right = std::min<LONG>((LONG)sd.dwWidth, rc.right);
+    rc.bottom = std::min<LONG>((LONG)sd.dwHeight, rc.bottom);
+
+    const int srcW = (int)(rc.right - rc.left);
+    const int srcH = (int)(rc.bottom - rc.top);
+    if (srcW <= 0 || srcH <= 0) {
+      return false;
+    }
+
+    if (!EnsureSrcTextureUnlocked((UINT)srcW, (UINT)srcH)) {
+      return false;
+    }
+    if (!UploadSurfaceRectToSrcTextureUnlocked(srcSurf, rc, (UINT)srcW, (UINT)srcH)) {
+      return false;
+    }
+
+    HRESULT hr = D3D_OK;
+    if (method == SurfaceScaleMethod::kBilinear) {
+      hr = RenderSinglePassUnlocked(srcTex_, dstW, dstH, /*linear=*/true);
+      if (SUCCEEDED(hr)) {
+        hr = dev_->Present(nullptr, nullptr, nullptr, nullptr);
+      }
+      return SUCCEEDED(hr);
+    }
+
+    // Bicubic: two-pass separable cubic filter (4 taps per pass).
+    if (!EnsureBicubicShadersUnlocked()) {
+      return false;
+    }
+    if (!EnsureIntermediateUnlocked(dstW, (UINT)srcH)) {
+      return false;
+    }
+
+    // Pass 1: horizontal cubic scaling to (dstW x srcH) render target.
+    IDirect3DSurface9* interRt = nullptr;
+    hr = interTex_->GetSurfaceLevel(0, &interRt);
+    if (FAILED(hr) || !interRt) {
+      SafeRelease(interRt);
+      return false;
+    }
+
+    IDirect3DSurface9* prevRt = nullptr;
+    hr = dev_->GetRenderTarget(0, &prevRt);
+    if (FAILED(hr) || !prevRt) {
+      SafeRelease(interRt);
+      SafeRelease(prevRt);
+      return false;
+    }
+
+    hr = dev_->SetRenderTarget(0, interRt);
+    SafeRelease(interRt);
+    if (FAILED(hr)) {
+      SafeRelease(prevRt);
+      return false;
+    }
+
+    if (FAILED(RenderCubicPassUnlocked(srcTex_, psCubicH_, dstW, (UINT)srcH, (UINT)srcW, (UINT)srcH))) {
+      (void)dev_->SetRenderTarget(0, prevRt);
+      SafeRelease(prevRt);
+      return false;
+    }
+
+    // Pass 2: vertical cubic scaling to backbuffer (dstW x dstH).
+    hr = dev_->SetRenderTarget(0, prevRt);
+    SafeRelease(prevRt);
+    if (FAILED(hr)) {
+      return false;
+    }
+    if (FAILED(RenderCubicPassUnlocked(interTex_, psCubicV_, dstW, dstH, dstW, (UINT)srcH))) {
+      return false;
+    }
+
+    hr = dev_->Present(nullptr, nullptr, nullptr, nullptr);
+    return SUCCEEDED(hr);
   }
 
-  PixelFormatInfo srcFmt;
-  PixelFormatInfo dstFmt;
-  if (!GetPixelFormatInfoFromSurface(srcSurf, &srcFmt) || !GetPixelFormatInfoFromSurface(dstSurf, &dstFmt)) {
-    return E_FAIL;
-  }
-  if (srcFmt.bytesPerPixel != dstFmt.bytesPerPixel ||
-      srcFmt.rMask != dstFmt.rMask ||
-      srcFmt.gMask != dstFmt.gMask ||
-      srcFmt.bMask != dstFmt.bMask ||
-      srcFmt.aMask != dstFmt.aMask) {
-    return E_FAIL;
+  void Shutdown() {
+    std::lock_guard<std::mutex> lock(mu_);
+    ShutdownUnlocked();
   }
 
-  DDSURFACEDESC2 ssd{};
-  ssd.dwSize = sizeof(ssd);
-  DDSURFACEDESC2 dsd{};
-  dsd.dwSize = sizeof(dsd);
+ private:
+  static constexpr DWORD kQuadFVF = D3DFVF_XYZRHW | D3DFVF_TEX1;
 
-  HRESULT hrS = srcSurf->Lock(nullptr, &ssd, DDLOCK_WAIT | DDLOCK_READONLY, nullptr);
-  if (FAILED(hrS) || !ssd.lpSurface || ssd.lPitch <= 0) {
-    if (SUCCEEDED(hrS)) {
+  struct QuadVtx {
+    float x, y, z, rhw;
+    float u, v;
+  };
+
+  void ShutdownUnlocked() {
+    SafeRelease(psCubicH_);
+    SafeRelease(psCubicV_);
+    SafeRelease(interTex_);
+    interW_ = 0;
+    interH_ = 0;
+    SafeRelease(srcTex_);
+    srcW_ = 0;
+    srcH_ = 0;
+    SafeRelease(dev_);
+    SafeRelease(d3d_);
+    hwnd_ = nullptr;
+    bbW_ = 0;
+    bbH_ = 0;
+    staging_.clear();
+
+    fpCreate9_ = nullptr;
+    if (d3d9Mod_) {
+      FreeLibrary(d3d9Mod_);
+      d3d9Mod_ = nullptr;
+    }
+
+    fpCompile_ = nullptr;
+    if (compilerMod_) {
+      FreeLibrary(compilerMod_);
+      compilerMod_ = nullptr;
+    }
+    shadersTried_ = false;
+  }
+
+  bool EnsureD3D9LoadedUnlocked() {
+    if (fpCreate9_) {
+      return true;
+    }
+    if (!d3d9Mod_) {
+      d3d9Mod_ = LoadLibraryW(L"d3d9.dll");
+      if (!d3d9Mod_) {
+        return false;
+      }
+    }
+    fpCreate9_ = (Direct3DCreate9_t)GetProcAddress(d3d9Mod_, "Direct3DCreate9");
+    return fpCreate9_ != nullptr;
+  }
+
+  bool EnsureDeviceUnlocked(HWND hwnd, UINT bbW, UINT bbH) {
+    if (!EnsureD3D9LoadedUnlocked()) {
+      return false;
+    }
+
+    const bool needNew = (!dev_ || !d3d_ || hwnd_ != hwnd || bbW_ != bbW || bbH_ != bbH);
+    if (!needNew) {
+      return true;
+    }
+
+    // Recreate everything (simple and robust; resize is infrequent).
+    SafeRelease(psCubicH_);
+    SafeRelease(psCubicV_);
+    SafeRelease(interTex_);
+    interW_ = 0;
+    interH_ = 0;
+    SafeRelease(srcTex_);
+    srcW_ = 0;
+    srcH_ = 0;
+    SafeRelease(dev_);
+    SafeRelease(d3d_);
+
+    d3d_ = fpCreate9_(D3D_SDK_VERSION);
+    if (!d3d_) {
+      return false;
+    }
+
+    D3DPRESENT_PARAMETERS pp{};
+    pp.Windowed = TRUE;
+    pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    pp.hDeviceWindow = hwnd;
+    pp.BackBufferWidth = bbW;
+    pp.BackBufferHeight = bbH;
+    pp.BackBufferFormat = D3DFMT_X8R8G8B8;
+    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+
+    DWORD createFlags = D3DCREATE_FPU_PRESERVE | D3DCREATE_MULTITHREADED | D3DCREATE_HARDWARE_VERTEXPROCESSING;
+    HRESULT hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT,
+                                    D3DDEVTYPE_HAL,
+                                    hwnd,
+                                    createFlags,
+                                    &pp,
+                                    &dev_);
+    if (FAILED(hr)) {
+      createFlags = D3DCREATE_FPU_PRESERVE | D3DCREATE_MULTITHREADED | D3DCREATE_SOFTWARE_VERTEXPROCESSING;
+      hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT,
+                              D3DDEVTYPE_HAL,
+                              hwnd,
+                              createFlags,
+                              &pp,
+                              &dev_);
+    }
+    if (FAILED(hr) || !dev_) {
+      SafeRelease(dev_);
+      SafeRelease(d3d_);
+      return false;
+    }
+
+    hwnd_ = hwnd;
+    bbW_ = bbW;
+    bbH_ = bbH;
+
+    // Fixed pipeline state (we re-assert key bits per draw).
+    return true;
+  }
+
+  bool EnsureSrcTextureUnlocked(UINT w, UINT h) {
+    if (srcTex_ && srcW_ == w && srcH_ == h) {
+      return true;
+    }
+    SafeRelease(srcTex_);
+    srcW_ = 0;
+    srcH_ = 0;
+    HRESULT hr = dev_->CreateTexture(w,
+                                    h,
+                                    1,
+                                    D3DUSAGE_DYNAMIC,
+                                    D3DFMT_A8R8G8B8,
+                                    D3DPOOL_DEFAULT,
+                                    &srcTex_,
+                                    nullptr);
+    if (FAILED(hr) || !srcTex_) {
+      SafeRelease(srcTex_);
+      return false;
+    }
+    srcW_ = w;
+    srcH_ = h;
+    return true;
+  }
+
+  bool EnsureIntermediateUnlocked(UINT w, UINT h) {
+    if (interTex_ && interW_ == w && interH_ == h) {
+      return true;
+    }
+    SafeRelease(interTex_);
+    interW_ = 0;
+    interH_ = 0;
+    HRESULT hr = dev_->CreateTexture(w,
+                                    h,
+                                    1,
+                                    D3DUSAGE_RENDERTARGET,
+                                    D3DFMT_A8R8G8B8,
+                                    D3DPOOL_DEFAULT,
+                                    &interTex_,
+                                    nullptr);
+    if (FAILED(hr) || !interTex_) {
+      SafeRelease(interTex_);
+      return false;
+    }
+    interW_ = w;
+    interH_ = h;
+    return true;
+  }
+
+  bool EnsureCompilerUnlocked() {
+    if (fpCompile_) {
+      return true;
+    }
+    static const wchar_t* kDlls[] = {
+        L"d3dcompiler_47.dll",
+        L"d3dcompiler_46.dll",
+        L"d3dcompiler_45.dll",
+        L"d3dcompiler_44.dll",
+        L"d3dcompiler_43.dll",
+        L"d3dcompiler_42.dll",
+        L"d3dcompiler_41.dll",
+    };
+    for (const wchar_t* name : kDlls) {
+      HMODULE m = LoadLibraryW(name);
+      if (!m) {
+        continue;
+      }
+      auto fn = (D3DCompile_t)GetProcAddress(m, "D3DCompile");
+      if (fn) {
+        compilerMod_ = m;
+        fpCompile_ = fn;
+        return true;
+      }
+      FreeLibrary(m);
+    }
+    return false;
+  }
+
+  bool EnsureBicubicShadersUnlocked() {
+    if (psCubicH_ && psCubicV_) {
+      return true;
+    }
+    if (shadersTried_) {
+      return false;
+    }
+    shadersTried_ = true;
+
+    if (!EnsureCompilerUnlocked()) {
+      return false;
+    }
+
+    // Catmull-Rom cubic (A=-0.5) with low instruction count (fits ps_2_0).
+    static const char* kCubicHlslH =
+      "float4 p : register(c0);\n" // x=srcW, y=srcH, z=invW, w=invH
+      "sampler2D s0 : register(s0);\n"
+      "float4 main(float2 uv : TEXCOORD0) : COLOR0 {\n"
+      "  float x = uv.x * p.x - 0.5;\n"
+      "  float ix = floor(x);\n"
+      "  float t = x - ix;\n"
+      "  float t2 = t * t;\n"
+      "  float t3 = t2 * t;\n"
+      "  float w0 = -0.5*t + 1.0*t2 - 0.5*t3;\n"
+      "  float w1 = 1.0 - 2.5*t2 + 1.5*t3;\n"
+      "  float w2 = 0.5*t + 2.0*t2 - 1.5*t3;\n"
+      "  float w3 = -0.5*t2 + 0.5*t3;\n"
+      "  float u0 = (ix - 1.0 + 0.5) * p.z;\n"
+      "  float u1 = (ix + 0.0 + 0.5) * p.z;\n"
+      "  float u2 = (ix + 1.0 + 0.5) * p.z;\n"
+      "  float u3 = (ix + 2.0 + 0.5) * p.z;\n"
+      "  float4 c = tex2D(s0, float2(u0, uv.y)) * w0 +\n"
+      "            tex2D(s0, float2(u1, uv.y)) * w1 +\n"
+      "            tex2D(s0, float2(u2, uv.y)) * w2 +\n"
+      "            tex2D(s0, float2(u3, uv.y)) * w3;\n"
+      "  return c;\n"
+      "}\n";
+
+    static const char* kCubicHlslV =
+      "float4 p : register(c0);\n" // x=srcW, y=srcH, z=invW, w=invH
+      "sampler2D s0 : register(s0);\n"
+      "float4 main(float2 uv : TEXCOORD0) : COLOR0 {\n"
+      "  float y = uv.y * p.y - 0.5;\n"
+      "  float iy = floor(y);\n"
+      "  float t = y - iy;\n"
+      "  float t2 = t * t;\n"
+      "  float t3 = t2 * t;\n"
+      "  float w0 = -0.5*t + 1.0*t2 - 0.5*t3;\n"
+      "  float w1 = 1.0 - 2.5*t2 + 1.5*t3;\n"
+      "  float w2 = 0.5*t + 2.0*t2 - 1.5*t3;\n"
+      "  float w3 = -0.5*t2 + 0.5*t3;\n"
+      "  float v0 = (iy - 1.0 + 0.5) * p.w;\n"
+      "  float v1 = (iy + 0.0 + 0.5) * p.w;\n"
+      "  float v2 = (iy + 1.0 + 0.5) * p.w;\n"
+      "  float v3 = (iy + 2.0 + 0.5) * p.w;\n"
+      "  float4 c = tex2D(s0, float2(uv.x, v0)) * w0 +\n"
+      "            tex2D(s0, float2(uv.x, v1)) * w1 +\n"
+      "            tex2D(s0, float2(uv.x, v2)) * w2 +\n"
+      "            tex2D(s0, float2(uv.x, v3)) * w3;\n"
+      "  return c;\n"
+      "}\n";
+
+    ID3DBlob* codeH = nullptr;
+    ID3DBlob* errH = nullptr;
+    HRESULT hr = fpCompile_(kCubicHlslH, (SIZE_T)strlen(kCubicHlslH), "hklmwrap_ddraw_cubic_h", nullptr, nullptr,
+                            "main", "ps_2_0", 0, 0, &codeH, &errH);
+    if (FAILED(hr) || !codeH) {
+      if (errH) {
+        Tracef("bicubic shader compile (H) failed hr=0x%08lX: %s", (unsigned long)hr, (const char*)errH->GetBufferPointer());
+      } else {
+        Tracef("bicubic shader compile (H) failed hr=0x%08lX", (unsigned long)hr);
+      }
+      SafeRelease(errH);
+      SafeRelease(codeH);
+      return false;
+    }
+    SafeRelease(errH);
+
+    ID3DBlob* codeV = nullptr;
+    ID3DBlob* errV = nullptr;
+    hr = fpCompile_(kCubicHlslV, (SIZE_T)strlen(kCubicHlslV), "hklmwrap_ddraw_cubic_v", nullptr, nullptr,
+                    "main", "ps_2_0", 0, 0, &codeV, &errV);
+    if (FAILED(hr) || !codeV) {
+      if (errV) {
+        Tracef("bicubic shader compile (V) failed hr=0x%08lX: %s", (unsigned long)hr, (const char*)errV->GetBufferPointer());
+      } else {
+        Tracef("bicubic shader compile (V) failed hr=0x%08lX", (unsigned long)hr);
+      }
+      SafeRelease(errV);
+      SafeRelease(codeV);
+      SafeRelease(codeH);
+      return false;
+    }
+    SafeRelease(errV);
+
+    hr = dev_->CreatePixelShader((const DWORD*)codeH->GetBufferPointer(), &psCubicH_);
+    SafeRelease(codeH);
+    if (FAILED(hr) || !psCubicH_) {
+      SafeRelease(codeV);
+      SafeRelease(psCubicH_);
+      return false;
+    }
+    hr = dev_->CreatePixelShader((const DWORD*)codeV->GetBufferPointer(), &psCubicV_);
+    SafeRelease(codeV);
+    if (FAILED(hr) || !psCubicV_) {
+      SafeRelease(psCubicH_);
+      SafeRelease(psCubicV_);
+      return false;
+    }
+    return true;
+  }
+
+  bool UploadSurfaceRectToSrcTextureUnlocked(LPDIRECTDRAWSURFACE7 srcSurf, const RECT& rc, UINT w, UINT h) {
+    PixelFormatInfo srcFmt;
+    if (!GetPixelFormatInfoFromSurface(srcSurf, &srcFmt)) {
+      return false;
+    }
+
+    DDSURFACEDESC2 ssd{};
+    ssd.dwSize = sizeof(ssd);
+    // Avoid stalling on wrappers that keep surfaces on the GPU (common with dgVoodoo).
+    // If we can't lock immediately, let caller fall back to point stretch.
+    HRESULT hr = srcSurf->Lock(nullptr, &ssd, DDLOCK_DONOTWAIT | DDLOCK_READONLY, nullptr);
+    if (FAILED(hr) || !ssd.lpSurface || ssd.lPitch <= 0) {
+      if (SUCCEEDED(hr)) {
+        srcSurf->Unlock(nullptr);
+      }
+      return false;
+    }
+
+    const uint8_t* sBase = (const uint8_t*)ssd.lpSurface;
+    const int sPitch = (int)ssd.lPitch;
+    const int bpp = srcFmt.bytesPerPixel;
+    if (bpp != 2 && bpp != 4) {
       srcSurf->Unlock(nullptr);
+      return false;
     }
-    return FAILED(hrS) ? hrS : E_FAIL;
-  }
 
-  HRESULT hrD = dstSurf->Lock(nullptr, &dsd, DDLOCK_WAIT, nullptr);
-  if (FAILED(hrD) || !dsd.lpSurface || dsd.lPitch <= 0) {
+    const size_t needed = (size_t)w * (size_t)h;
+    if (staging_.size() < needed) {
+      staging_.resize(needed);
+    }
+
+    // Fast paths for common formats.
+    const bool isXrgb8888 =
+        (bpp == 4) &&
+        (srcFmt.rMask == 0x00FF0000) &&
+        (srcFmt.gMask == 0x0000FF00) &&
+        (srcFmt.bMask == 0x000000FF) &&
+        (srcFmt.aMask == 0);
+    const bool isArgb8888 =
+        (bpp == 4) &&
+        (srcFmt.rMask == 0x00FF0000) &&
+        (srcFmt.gMask == 0x0000FF00) &&
+        (srcFmt.bMask == 0x000000FF) &&
+        (srcFmt.aMask == 0xFF000000);
+    const bool isRgb565 =
+        (bpp == 2) &&
+        (srcFmt.rMask == 0xF800) &&
+        (srcFmt.gMask == 0x07E0) &&
+        (srcFmt.bMask == 0x001F) &&
+        (srcFmt.aMask == 0);
+
+    if (isArgb8888 || isXrgb8888) {
+      for (UINT y = 0; y < h; y++) {
+        const uint32_t* row = (const uint32_t*)(sBase + (ptrdiff_t)(rc.top + (LONG)y) * sPitch) + rc.left;
+        uint32_t* out = &staging_[y * w];
+        if (isArgb8888) {
+          memcpy(out, row, (size_t)w * sizeof(uint32_t));
+        } else {
+          for (UINT x = 0; x < w; x++) {
+            out[x] = row[x] | 0xFF000000u;
+          }
+        }
+      }
+    } else if (isRgb565) {
+      for (UINT y = 0; y < h; y++) {
+        const uint16_t* row = (const uint16_t*)(sBase + (ptrdiff_t)(rc.top + (LONG)y) * sPitch) + rc.left;
+        uint32_t* out = &staging_[y * w];
+        for (UINT x = 0; x < w; x++) {
+          const uint16_t p16 = row[x];
+          const uint32_t r5 = (uint32_t)((p16 >> 11) & 0x1F);
+          const uint32_t g6 = (uint32_t)((p16 >> 5) & 0x3F);
+          const uint32_t b5 = (uint32_t)(p16 & 0x1F);
+          const uint32_t r8 = (r5 << 3) | (r5 >> 2);
+          const uint32_t g8 = (g6 << 2) | (g6 >> 4);
+          const uint32_t b8 = (b5 << 3) | (b5 >> 2);
+          out[x] = 0xFF000000u | (r8 << 16) | (g8 << 8) | b8;
+        }
+      }
+    } else {
+      for (UINT y = 0; y < h; y++) {
+        for (UINT x = 0; x < w; x++) {
+          const int sx = (int)rc.left + (int)x;
+          const int sy = (int)rc.top + (int)y;
+          const uint32_t p = ReadPixel(sBase, sPitch, sx, sy, bpp);
+          uint8_t r, g, b, a;
+          UnpackRGBA(srcFmt, p, &r, &g, &b, &a);
+          staging_[y * w + x] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
+      }
+    }
+
     srcSurf->Unlock(nullptr);
-    if (SUCCEEDED(hrD)) {
-      dstSurf->Unlock(nullptr);
+
+    D3DLOCKED_RECT lr{};
+    hr = srcTex_->LockRect(0, &lr, nullptr, D3DLOCK_DISCARD);
+    if (FAILED(hr) || !lr.pBits || lr.Pitch <= 0) {
+      if (SUCCEEDED(hr)) {
+        srcTex_->UnlockRect(0);
+      }
+      return false;
     }
-    return FAILED(hrD) ? hrD : E_FAIL;
+    const int dstPitch = (int)lr.Pitch;
+    uint8_t* dst = (uint8_t*)lr.pBits;
+    for (UINT y = 0; y < h; y++) {
+      memcpy(dst + (size_t)y * (size_t)dstPitch, &staging_[y * w], (size_t)w * sizeof(uint32_t));
+    }
+    srcTex_->UnlockRect(0);
+    return true;
   }
 
-  const int bpp = srcFmt.bytesPerPixel;
-  const uint8_t* sBase = (const uint8_t*)ssd.lpSurface;
-  uint8_t* dBase = (uint8_t*)dsd.lpSurface;
-  const int sPitch = (int)ssd.lPitch;
-  const int dPitch = (int)dsd.lPitch;
-
-  // Fixed-point mapping: clamped dst -> src in 16.16.
-  const int32_t xStep = (int32_t)(((int64_t)srcW << 16) / dstW);
-  const int32_t yStep = (int32_t)(((int64_t)srcH << 16) / dstH);
-
-  for (int y = 0; y < dstH; y++) {
-    const int32_t sy16 = (int32_t)((int64_t)y * yStep);
-    int sy = (sy16 >> 16);
-    int fy = sy16 & 0xFFFF;
-    if (sy < 0) {
-      sy = 0;
-      fy = 0;
-    }
-    if (sy >= srcH - 1) {
-      sy = std::max(0, srcH - 2);
-      fy = 0xFFFF;
-    }
-
-    for (int x = 0; x < dstW; x++) {
-      const int32_t sx16 = (int32_t)((int64_t)x * xStep);
-      int sx = (sx16 >> 16);
-      int fx = sx16 & 0xFFFF;
-      if (sx < 0) {
-        sx = 0;
-        fx = 0;
-      }
-      if (sx >= srcW - 1) {
-        sx = std::max(0, srcW - 2);
-        fx = 0xFFFF;
-      }
-
-      const int sX0 = srcRc.left + sx;
-      const int sY0 = srcRc.top + sy;
-
-      const uint32_t p00 = ReadPixel(sBase, sPitch, sX0, sY0, bpp);
-      const uint32_t p10 = ReadPixel(sBase, sPitch, sX0 + 1, sY0, bpp);
-      const uint32_t p01 = ReadPixel(sBase, sPitch, sX0, sY0 + 1, bpp);
-      const uint32_t p11 = ReadPixel(sBase, sPitch, sX0 + 1, sY0 + 1, bpp);
-
-      uint8_t r00, g00, b00, a00;
-      uint8_t r10, g10, b10, a10;
-      uint8_t r01, g01, b01, a01;
-      uint8_t r11, g11, b11, a11;
-      UnpackRGBA(srcFmt, p00, &r00, &g00, &b00, &a00);
-      UnpackRGBA(srcFmt, p10, &r10, &g10, &b10, &a10);
-      UnpackRGBA(srcFmt, p01, &r01, &g01, &b01, &a01);
-      UnpackRGBA(srcFmt, p11, &r11, &g11, &b11, &a11);
-
-      const int invFx = 0x10000 - fx;
-      const int invFy = 0x10000 - fy;
-
-      auto lerp2 = [&](int c00, int c10, int c01, int c11) -> uint8_t {
-        const int top = (c00 * invFx + c10 * fx) >> 16;
-        const int bot = (c01 * invFx + c11 * fx) >> 16;
-        const int out = (top * invFy + bot * fy) >> 16;
-        return (uint8_t)std::clamp(out, 0, 255);
-      };
-
-      const uint8_t r = lerp2(r00, r10, r01, r11);
-      const uint8_t g = lerp2(g00, g10, g01, g11);
-      const uint8_t b = lerp2(b00, b10, b01, b11);
-      const uint8_t a = lerp2(a00, a10, a01, a11);
-      const uint32_t outPx = PackRGBA(dstFmt, r, g, b, a);
-
-      const int dX = clampedDst.left + x;
-      const int dY = clampedDst.top + y;
-      WritePixel(dBase, dPitch, dX, dY, bpp, outPx);
-    }
+  void SetCommonDrawStateUnlocked(bool linear) {
+    (void)dev_->SetRenderState(D3DRS_ZENABLE, FALSE);
+    (void)dev_->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    (void)dev_->SetRenderState(D3DRS_LIGHTING, FALSE);
+    (void)dev_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    (void)dev_->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+    (void)dev_->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    (void)dev_->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    (void)dev_->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    (void)dev_->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    (void)dev_->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    (void)dev_->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    (void)dev_->SetSamplerState(0, D3DSAMP_MINFILTER, linear ? D3DTEXF_LINEAR : D3DTEXF_POINT);
+    (void)dev_->SetSamplerState(0, D3DSAMP_MAGFILTER, linear ? D3DTEXF_LINEAR : D3DTEXF_POINT);
+    (void)dev_->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
   }
 
-  dstSurf->Unlock(nullptr);
-  srcSurf->Unlock(nullptr);
-  return DD_OK;
-}
+  HRESULT RenderSinglePassUnlocked(IDirect3DTexture9* tex, UINT w, UINT h, bool linear) {
+    if (!tex) {
+      return E_INVALIDARG;
+    }
+    D3DVIEWPORT9 vp{};
+    vp.X = 0;
+    vp.Y = 0;
+    vp.Width = w;
+    vp.Height = h;
+    vp.MinZ = 0.0f;
+    vp.MaxZ = 1.0f;
+    (void)dev_->SetViewport(&vp);
+
+    SetCommonDrawStateUnlocked(linear);
+
+    (void)dev_->SetPixelShader(nullptr);
+    (void)dev_->SetTexture(0, tex);
+    (void)dev_->SetFVF(kQuadFVF);
+
+    const float fw = (float)w;
+    const float fh = (float)h;
+    QuadVtx v[4] = {
+        {-0.5f, -0.5f, 0.0f, 1.0f, 0.0f, 0.0f},
+        {fw - 0.5f, -0.5f, 0.0f, 1.0f, 1.0f, 0.0f},
+        {-0.5f, fh - 0.5f, 0.0f, 1.0f, 0.0f, 1.0f},
+        {fw - 0.5f, fh - 0.5f, 0.0f, 1.0f, 1.0f, 1.0f},
+    };
+
+    HRESULT hr = dev_->BeginScene();
+    if (FAILED(hr)) {
+      return hr;
+    }
+    hr = dev_->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(QuadVtx));
+    (void)dev_->EndScene();
+    return hr;
+  }
+
+  HRESULT RenderCubicPassUnlocked(IDirect3DTexture9* tex,
+                                 IDirect3DPixelShader9* ps,
+                                 UINT outW,
+                                 UINT outH,
+                                 UINT inW,
+                                 UINT inH) {
+    if (!tex || !ps || outW == 0 || outH == 0 || inW == 0 || inH == 0) {
+      return E_INVALIDARG;
+    }
+    D3DVIEWPORT9 vp{};
+    vp.X = 0;
+    vp.Y = 0;
+    vp.Width = outW;
+    vp.Height = outH;
+    vp.MinZ = 0.0f;
+    vp.MaxZ = 1.0f;
+    (void)dev_->SetViewport(&vp);
+
+    // Point sampling; shader computes weights.
+    SetCommonDrawStateUnlocked(/*linear=*/false);
+
+    (void)dev_->SetTexture(0, tex);
+    (void)dev_->SetPixelShader(ps);
+    (void)dev_->SetFVF(kQuadFVF);
+
+    const float params[4] = {
+        (float)inW,
+        (float)inH,
+        1.0f / (float)inW,
+        1.0f / (float)inH,
+    };
+    (void)dev_->SetPixelShaderConstantF(0, params, 1);
+
+    const float fw = (float)outW;
+    const float fh = (float)outH;
+    QuadVtx v[4] = {
+        {-0.5f, -0.5f, 0.0f, 1.0f, 0.0f, 0.0f},
+        {fw - 0.5f, -0.5f, 0.0f, 1.0f, 1.0f, 0.0f},
+        {-0.5f, fh - 0.5f, 0.0f, 1.0f, 0.0f, 1.0f},
+        {fw - 0.5f, fh - 0.5f, 0.0f, 1.0f, 1.0f, 1.0f},
+    };
+
+    HRESULT hr = dev_->BeginScene();
+    if (FAILED(hr)) {
+      return hr;
+    }
+    hr = dev_->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(QuadVtx));
+    (void)dev_->EndScene();
+    return hr;
+  }
+
+  std::mutex mu_;
+  HMODULE d3d9Mod_ = nullptr;
+  Direct3DCreate9_t fpCreate9_ = nullptr;
+  IDirect3D9* d3d_ = nullptr;
+  IDirect3DDevice9* dev_ = nullptr;
+  HWND hwnd_ = nullptr;
+  UINT bbW_ = 0;
+  UINT bbH_ = 0;
+
+  IDirect3DTexture9* srcTex_ = nullptr;
+  UINT srcW_ = 0;
+  UINT srcH_ = 0;
+
+  IDirect3DTexture9* interTex_ = nullptr;
+  UINT interW_ = 0;
+  UINT interH_ = 0;
+
+  HMODULE compilerMod_ = nullptr;
+  D3DCompile_t fpCompile_ = nullptr;
+  bool shadersTried_ = false;
+
+  IDirect3DPixelShader9* psCubicH_ = nullptr;
+  IDirect3DPixelShader9* psCubicV_ = nullptr;
+
+  std::vector<uint32_t> staging_;
+};
+
+static DDrawD3D9Scaler g_d3d9Scaler;
 
 // --- Originals / hook targets ---
 using DirectDrawCreate_t = HRESULT(WINAPI*)(GUID*, LPDIRECTDRAW*, IUnknown*);
@@ -873,9 +1491,7 @@ static bool InstallDDrawSurfaceDoublingHooksOnce() {
     Tracef("surface scaling: invalid --scale-method '%ls' -> defaulting to point", cfg.methodRaw.c_str());
   }
   Tracef("surface scaling enabled (scale=%.3f method=%ls)", cfg.factor, SurfaceScaleMethodToString(cfg.method));
-  if (cfg.method == SurfaceScaleMethod::kBicubic) {
-    Tracef("note: DirectDraw path uses GDI HALFTONE StretchBlt for non-point filtering (bicubic is approximated)");
-  }
+  Tracef("DirectDraw path: filtered scaling uses D3D9 (GPU); fallback on failure is point stretch");
 
   if (!AcquireMinHook()) {
     Tracef("AcquireMinHook failed");
@@ -1070,6 +1686,20 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Flip(LPDIRECTDRAWSURFACE7 primary, LP
     return g_fpDDS7_Flip(primary, targetOverride, flags);
   }
 
+  // DirectDraw wrappers (dgVoodoo/etc) commonly keep surfaces on the GPU and can
+  // make Lock/CPU readback paths unreliable/slow. The shim no longer tries to
+  // "fix" wrapper present paths via DXGI post-filter hooks; use a dgVoodoo AddOn
+  // for scaling/filtering instead.
+  const bool isWrapper = IsLikelyWrapperDDrawDll();
+  if (isWrapper) {
+    static std::atomic<bool> logged{false};
+    bool expected = false;
+    if (logged.compare_exchange_strong(expected, true)) {
+      Tracef("DirectDraw wrapper detected; shim surface scaling disabled for this path (use dgVoodoo AddOn)");
+    }
+    return g_fpDDS7_Flip(primary, targetOverride, flags);
+  }
+
   // Prefer cached backbuffer to avoid per-frame GetAttachedSurface/GetSurfaceDesc overhead.
   LPDIRECTDRAWSURFACE7 back = nullptr;
   DWORD srcW = 0;
@@ -1108,7 +1738,16 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Flip(LPDIRECTDRAWSURFACE7 primary, LP
   }
 
   HRESULT hr = DDERR_GENERIC;
-  if (cfg.method == SurfaceScaleMethod::kPoint) {
+  const bool forcedPointFallback = false;
+  const bool usePointPath = (cfg.method == SurfaceScaleMethod::kPoint) || forcedPointFallback;
+  if (usePointPath) {
+    if (forcedPointFallback) {
+      static std::atomic<bool> logged{false};
+      bool expected = false;
+      if (logged.compare_exchange_strong(expected, true)) {
+        Tracef("Flip: wrapper ddraw detected; using point fallback until DXGI post-filter activates (requested=%ls)", SurfaceScaleMethodToString(cfg.method));
+      }
+    }
     // Try to avoid introducing extra latency: don't force DDBLT_WAIT.
     // If the blit can't be scheduled immediately, do a one-time blocking fallback
     // to avoid intermittent unscaled presents.
@@ -1126,41 +1765,26 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Flip(LPDIRECTDRAWSURFACE7 primary, LP
       }
     }
   } else {
-    // GDI StretchBlt path for smoother filtering.
-    HDC hdcDst = nullptr;
-    HDC hdcSrc = nullptr;
-    HRESULT hrDst = primary->GetDC(&hdcDst);
-    HRESULT hrSrc = back->GetDC(&hdcSrc);
-    if (FAILED(hrDst) || FAILED(hrSrc) || !hdcDst || !hdcSrc) {
-      if (hdcSrc) {
-        back->ReleaseDC(hdcSrc);
-      }
-      if (hdcDst) {
-        primary->ReleaseDC(hdcDst);
-      }
-      hr = primary->Blt(&dst, back, &src, DDBLT_DONOTWAIT, nullptr);
+    // Hardware accelerated path (D3D9). If it fails, fall back to point stretch.
+    const bool okGpu = g_d3d9Scaler.PresentScaled(back, src, hwnd, (UINT)clientW, (UINT)clientH, cfg.method);
+    if (okGpu) {
+      hr = DD_OK;
     } else {
-      int stretchMode = HALFTONE;
-      (void)SetStretchBltMode(hdcDst, stretchMode);
-      (void)SetBrushOrgEx(hdcDst, 0, 0, nullptr);
-      const int dstW = dst.right - dst.left;
-      const int dstH = dst.bottom - dst.top;
-      const int srcWInt = src.right - src.left;
-      const int srcHInt = src.bottom - src.top;
-      BOOL ok = StretchBlt(hdcDst,
-                          dst.left,
-                          dst.top,
-                          dstW,
-                          dstH,
-                          hdcSrc,
-                          src.left,
-                          src.top,
-                          srcWInt,
-                          srcHInt,
-                          SRCCOPY);
-      back->ReleaseDC(hdcSrc);
-      primary->ReleaseDC(hdcDst);
-      hr = ok ? DD_OK : E_FAIL;
+      bool expected = false;
+      if (g_loggedFilteredFallback.compare_exchange_strong(expected, true)) {
+        Tracef("Flip: GPU filtered scaling failed (method=%ls); falling back to point stretch", SurfaceScaleMethodToString(cfg.method));
+      }
+      if (g_fpDDS7_Blt) {
+        hr = g_fpDDS7_Blt(primary, &dst, back, &src, DDBLT_DONOTWAIT, nullptr);
+        if (hr == DDERR_WASSTILLDRAWING) {
+          hr = g_fpDDS7_Blt(primary, &dst, back, &src, DDBLT_WAIT, nullptr);
+        }
+      } else {
+        hr = primary->Blt(&dst, back, &src, DDBLT_DONOTWAIT, nullptr);
+        if (hr == DDERR_WASSTILLDRAWING) {
+          hr = primary->Blt(&dst, back, &src, DDBLT_WAIT, nullptr);
+        }
+      }
     }
   }
 
@@ -1170,7 +1794,7 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Flip(LPDIRECTDRAWSURFACE7 primary, LP
     bool expected = false;
     if (SUCCEEDED(hr) && g_loggedScaleViaFlip.compare_exchange_strong(expected, true)) {
       Tracef("Flip: scaled via %s (method=%ls)",
-             (cfg.method == SurfaceScaleMethod::kPoint) ? "DirectDraw::Blt stretch" : "GDI StretchBlt",
+             usePointPath ? "DirectDraw::Blt stretch" : "D3D9 GPU present",
              SurfaceScaleMethodToString(cfg.method));
     }
   }
@@ -1231,6 +1855,18 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Blt(LPDIRECTDRAWSURFACE7 self,
         }
       }
 
+      // Do not attempt DirectDraw present-time scaling on wrapper ddraw.dlls
+      // (dgVoodoo/etc). This used to rely on a separate DXGI post-filter hook,
+      // but that path is intentionally removed.
+      if (IsLikelyWrapperDDrawDll()) {
+        static std::atomic<bool> logged{false};
+        bool expected = false;
+        if (logged.compare_exchange_strong(expected, true)) {
+          Tracef("Blt: DirectDraw wrapper detected; shim surface scaling disabled for this path (use dgVoodoo AddOn)");
+        }
+        return g_fpDDS7_Blt(self, dst, src, srcRect, flags, fx);
+      }
+
       // Determine source rect size.
       DDSURFACEDESC2 sd{};
       sd.dwSize = sizeof(sd);
@@ -1267,53 +1903,18 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Blt(LPDIRECTDRAWSURFACE7 self,
                 hrScale = g_fpDDS7_Blt(self, &localDst, src, &localSrc, DDBLT_WAIT, nullptr);
               }
             } else {
-              // GDI filtered stretch.
-              HDC hdcDst = nullptr;
-              HDC hdcSrc = nullptr;
-              HRESULT hrDst = self->GetDC(&hdcDst);
-              HRESULT hrSrc = src->GetDC(&hdcSrc);
-              if (SUCCEEDED(hrDst) && SUCCEEDED(hrSrc) && hdcDst && hdcSrc) {
-                (void)SetStretchBltMode(hdcDst, HALFTONE);
-                (void)SetBrushOrgEx(hdcDst, 0, 0, nullptr);
-                BOOL ok = StretchBlt(hdcDst,
-                                    localDst.left,
-                                    localDst.top,
-                                    localDst.right - localDst.left,
-                                    localDst.bottom - localDst.top,
-                                    hdcSrc,
-                                    localSrc.left,
-                                    localSrc.top,
-                                    localSrc.right - localSrc.left,
-                                    localSrc.bottom - localSrc.top,
-                                    SRCCOPY);
-                src->ReleaseDC(hdcSrc);
-                self->ReleaseDC(hdcDst);
-                hrScale = ok ? DD_OK : E_FAIL;
+              // Hardware accelerated path (D3D9). If it fails, fall back to point stretch.
+              const bool okGpu = g_d3d9Scaler.PresentScaled(src, localSrc, hwnd, (UINT)clientW, (UINT)clientH, cfg.method);
+              if (okGpu) {
+                hrScale = DD_OK;
               } else {
-                if (hdcSrc) {
-                  src->ReleaseDC(hdcSrc);
-                }
-                if (hdcDst) {
-                  self->ReleaseDC(hdcDst);
-                }
-                // Fallback 1: CPU bilinear via Lock (works even when GetDC is unsupported by wrappers).
-                hrScale = TryScaleViaLockBilinear(self, localDst, src, localSrc);
-                if (SUCCEEDED(hrScale)) {
-                  bool expected = false;
-                  if (g_loggedLockScale.compare_exchange_strong(expected, true)) {
-                    Tracef("Blt: filtered scaling via Lock/CPU active (method=%ls)", SurfaceScaleMethodToString(cfg.method));
-                  }
-                } else {
-                  // Fallback 2: point stretch.
-                  hrScale = g_fpDDS7_Blt(self, &localDst, src, &localSrc, DDBLT_DONOTWAIT, nullptr);
-                  if (FAILED(hrScale)) {
-                    hrScale = g_fpDDS7_Blt(self, &localDst, src, &localSrc, DDBLT_WAIT, nullptr);
-                  }
+                hrScale = g_fpDDS7_Blt(self, &localDst, src, &localSrc, DDBLT_DONOTWAIT, nullptr);
+                if (FAILED(hrScale)) {
+                  hrScale = g_fpDDS7_Blt(self, &localDst, src, &localSrc, DDBLT_WAIT, nullptr);
                 }
                 bool expected = false;
                 if (g_loggedFilteredFallback.compare_exchange_strong(expected, true)) {
-                  Tracef("Blt: filtered method requested (%ls) but GetDC failed; falling back to point stretch", SurfaceScaleMethodToString(cfg.method));
-                  Tracef("Blt: GetDC results hrDst=0x%08lX hrSrc=0x%08lX", (unsigned long)hrDst, (unsigned long)hrSrc);
+                  Tracef("Blt: GPU filtered scaling failed (method=%ls); falling back to point stretch", SurfaceScaleMethodToString(cfg.method));
                 }
               }
             }
@@ -1322,7 +1923,7 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Blt(LPDIRECTDRAWSURFACE7 self,
               bool expected = false;
               if (g_loggedScaleViaBlt.compare_exchange_strong(expected, true)) {
                 Tracef("Blt: scaled via %s (method=%ls)",
-                       (cfg.method == SurfaceScaleMethod::kPoint) ? "DirectDraw::Blt stretch" : "GDI StretchBlt",
+                       (cfg.method == SurfaceScaleMethod::kPoint) ? "DirectDraw::Blt stretch" : "D3D9 GPU present",
                        SurfaceScaleMethodToString(cfg.method));
               }
               return DD_OK;
@@ -1394,6 +1995,18 @@ bool InstallDDrawSurfaceDoublingHooks() {
     return true;
   }
 
+  // If ddraw.dll is already loaded and it's not the system DLL, assume a wrapper
+  // (dgVoodoo/etc) and do not install DirectDraw scaling hooks.
+  if (GetModuleHandleW(L"ddraw.dll") != nullptr && IsLikelyWrapperDDrawDll()) {
+    static std::atomic<bool> logged{false};
+    bool expected = false;
+    if (logged.compare_exchange_strong(expected, true)) {
+      Tracef("ddraw.dll wrapper detected at install time; shim DirectDraw scaling hooks disabled (use dgVoodoo AddOn)");
+    }
+    g_active.store(false, std::memory_order_release);
+    return true;
+  }
+
   bool expected = false;
   if (!g_active.compare_exchange_strong(expected, true)) {
     return true;
@@ -1440,6 +2053,9 @@ void RemoveDDrawSurfaceDoublingHooks() {
     g_coopFlags = 0;
     g_resizedOnce = false;
   }
+
+  // Release any D3D9 resources used for filtered scaling.
+  g_d3d9Scaler.Shutdown();
 
   void* tgtFlip = g_targetDDS7_Flip.exchange(nullptr);
   if (tgtFlip) {

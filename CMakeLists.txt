@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(HKLM_WRAPPER_FETCH_MINHOOK "Fetch MinHook at configure time" ON)
 option(HKLM_WRAPPER_ENABLE_TESTS "Build unit tests" ON)
 option(HKLM_WRAPPER_MSVC_STATIC_RUNTIME "Use /MT runtime for wrapper/shim on MSVC" ON)
+option(HKLM_WRAPPER_ENABLE_DGVOODOO_ADDON "Build dgVoodoo AddOn DLL (requires dgVoodoo AddOn SDK)" OFF)
 
 include(CTest)
 
@@ -146,6 +147,48 @@ else()
 
   target_link_libraries(hklm_shim PRIVATE hklm_common minhook_static dxguid shell32)
   target_compile_definitions(hklm_shim PRIVATE UNICODE _UNICODE NOMINMAX)
+
+  if(HKLM_WRAPPER_ENABLE_DGVOODOO_ADDON)
+    if(NOT MSVC)
+      message(FATAL_ERROR
+        "HKLM_WRAPPER_ENABLE_DGVOODOO_ADDON=ON currently requires MSVC because the dgVoodoo SDK ships MSVC .lib files (dgVoodooAddon.lib).\n"
+        "Build the add-on on Windows with MSVC, or provide a MinGW-compatible import library.")
+    endif()
+
+    set(DGVOODOO_ADDON_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dgvoodoo_addon_sdk" CACHE PATH "Path to dgVoodoo AddOn SDK root")
+    set(DGVOODOO_ADDON_INC_DIR "${DGVOODOO_ADDON_SDK_DIR}/Inc" CACHE PATH "Path to dgVoodoo AddOn SDK 'Inc' directory")
+    set(DGVOODOO_ADDON_LIB_DIR "${DGVOODOO_ADDON_SDK_DIR}/Lib/x86" CACHE PATH "Path to dgVoodoo AddOn SDK lib directory (e.g. Lib/x86)")
+
+    if(NOT EXISTS "${DGVOODOO_ADDON_INC_DIR}/Addon/AddonDefs.hpp")
+      message(FATAL_ERROR
+        "dgVoodoo AddOn SDK headers not found under: ${DGVOODOO_ADDON_INC_DIR}/Addon/AddonDefs.hpp\n"
+        "Expected SDK layout: <sdk>/Inc/Addon/*.hpp")
+    endif()
+    if(NOT EXISTS "${DGVOODOO_ADDON_LIB_DIR}/dgVoodooAddon.lib")
+      message(FATAL_ERROR
+        "dgVoodooAddon.lib not found under: ${DGVOODOO_ADDON_LIB_DIR}/dgVoodooAddon.lib\n"
+        "Set -DDGVOODOO_ADDON_LIB_DIR=<path> to match your SDK/arch.")
+    endif()
+
+    add_library(hklm_dgvoodoo_addon SHARED
+      src/dgvoodoo_addon/addon_main.cpp
+      src/shim/surface_scale_config.cpp
+      src/shim/surface_scale_config.h
+    )
+    set_target_properties(hklm_dgvoodoo_addon PROPERTIES PREFIX "" OUTPUT_NAME "SampleAddon")
+    target_include_directories(hklm_dgvoodoo_addon PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${DGVOODOO_ADDON_INC_DIR}
+    )
+    target_link_libraries(hklm_dgvoodoo_addon PRIVATE shell32 "${DGVOODOO_ADDON_LIB_DIR}/dgVoodooAddon.lib")
+    target_compile_definitions(hklm_dgvoodoo_addon PRIVATE
+      UNICODE
+      _UNICODE
+      NOMINMAX
+    )
+
+    install(TARGETS hklm_dgvoodoo_addon RUNTIME DESTINATION bin LIBRARY DESTINATION bin)
+  endif()
 
   add_executable(hklm_wrapper WIN32
     src/wrapper/main.cpp

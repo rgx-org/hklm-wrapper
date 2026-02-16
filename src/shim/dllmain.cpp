@@ -57,7 +57,7 @@ DWORD WINAPI HookInitThreadProc(LPVOID) {
   // Install optional D3D9 Present scaling hooks (best-effort, async).
   (void)hklmwrap::InstallD3D9SurfaceDoublingHooks();
 
-  // Install optional DirectDraw scaling hooks (for dgVoodoo ddraw->dxgi paths).
+  // Install optional DirectDraw scaling hooks (system ddraw.dll paths only).
   (void)hklmwrap::InstallDDrawSurfaceDoublingHooks();
 
   if (!installed) {
