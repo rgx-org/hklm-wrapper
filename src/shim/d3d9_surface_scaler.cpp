@@ -1,4 +1,4 @@
-#include "shim/d3d9_surface_doubling.h"
+#include "shim/d3d9_surface_scaler.h"
 
 #include "shim/minhook_runtime.h"
 #include "shim/surface_scale_config.h"
@@ -73,7 +73,10 @@ static void D3D9TraceWrite(const char* text) {
   OutputDebugStringA(text);
 
   wchar_t pipeBuf[512] = {};
-  DWORD pipeLen = GetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  DWORD pipeLen = GetEnvironmentVariableW(L"TWINSHIM_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  if (!pipeLen || pipeLen >= (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0]))) {
+    pipeLen = GetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  }
   if (!pipeLen || pipeLen >= (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0]))) {
     return;
   }
@@ -329,7 +332,12 @@ static D3DTEXTUREFILTERTYPE FilterForMethod(SurfaceScaleMethod method) {
     case SurfaceScaleMethod::kBilinear:
       return D3DTEXF_LINEAR;
     case SurfaceScaleMethod::kBicubic:
+    case SurfaceScaleMethod::kCatmullRom:
+    case SurfaceScaleMethod::kLanczos:
+    case SurfaceScaleMethod::kLanczos3:
       return D3DTEXF_GAUSSIANQUAD;
+    case SurfaceScaleMethod::kPixelFast:
+      return D3DTEXF_LINEAR;
     default:
       return D3DTEXF_POINT;
   }
@@ -661,7 +669,7 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateDevice(IDirect3D9* self,
   if (!pPresentationParameters->Windowed) {
     bool expected = false;
     if (g_loggedFullscreenSkip.compare_exchange_strong(expected, true)) {
-      D3D9Tracef("CreateDevice: fullscreen detected -> surface doubling disabled (windowed-only)");
+      D3D9Tracef("CreateDevice: fullscreen detected -> surface scaling disabled (windowed-only)");
     }
     return g_fpCreateDevice(self, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
   }
@@ -751,7 +759,7 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateDeviceEx(IDirect3D9Ex* self,
   if (!pPresentationParameters->Windowed) {
     bool expected = false;
     if (g_loggedFullscreenSkip.compare_exchange_strong(expected, true)) {
-      D3D9Tracef("CreateDeviceEx: fullscreen detected -> surface doubling disabled (windowed-only)");
+      D3D9Tracef("CreateDeviceEx: fullscreen detected -> surface scaling disabled (windowed-only)");
     }
     return g_fpCreateDeviceEx(self,
                               Adapter,
@@ -962,13 +970,13 @@ static HRESULT STDMETHODCALLTYPE Hook_Present(IDirect3DDevice9* device,
   // Filtered upscale.
   D3DTEXTUREFILTERTYPE filter = FilterForMethod(st.scaleMethod);
   hr = device->StretchRect(src, pSourceRect, dst, nullptr, filter);
-  if (FAILED(hr) && st.scaleMethod == SurfaceScaleMethod::kBicubic) {
+  if (FAILED(hr) && filter == D3DTEXF_GAUSSIANQUAD) {
     // Fallback: many drivers reject GAUSSIANQUAD for StretchRect.
     {
       static std::atomic<bool> logged{false};
       bool expected = false;
       if (logged.compare_exchange_strong(expected, true)) {
-        D3D9Tracef("Present: bicubic requested but GAUSSIANQUAD rejected; falling back to linear");
+        D3D9Tracef("Present: high-quality filter requested but GAUSSIANQUAD rejected; falling back to linear");
       }
     }
     hr = device->StretchRect(src, pSourceRect, dst, nullptr, D3DTEXF_LINEAR);
@@ -1084,7 +1092,7 @@ static DWORD WINAPI D3D9InitThreadProc(LPVOID) {
 
 }
 
-bool InstallD3D9SurfaceDoublingHooks() {
+bool InstallD3D9SurfaceScalerHooks() {
   LogConfigOnceIfNeeded();
   if (!IsScalingEnabled()) {
     g_active.store(false, std::memory_order_release);
@@ -1125,11 +1133,11 @@ bool InstallD3D9SurfaceDoublingHooks() {
   return true;
 }
 
-bool AreD3D9SurfaceDoublingHooksActive() {
+bool AreD3D9SurfaceScalerHooksActive() {
   return g_hooksInstalled.load(std::memory_order_acquire);
 }
 
-void RemoveD3D9SurfaceDoublingHooks() {
+void RemoveD3D9SurfaceScalerHooks() {
   if (!g_active.exchange(false, std::memory_order_acq_rel)) {
     return;
   }

@@ -54,7 +54,10 @@ static void Tracef(const char* fmt, ...) {
 
   // Mirror to the same debug pipe the wrapper/shim uses, if present.
   wchar_t pipeBuf[512] = {};
-  DWORD pipeLen = GetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  DWORD pipeLen = GetEnvironmentVariableW(L"TWINSHIM_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  if (!pipeLen || pipeLen >= (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0]))) {
+    pipeLen = GetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  }
   if (pipeLen && pipeLen < (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0]))) {
     pipeBuf[pipeLen] = L'\0';
     HANDLE h = CreateFileW(pipeBuf, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -202,7 +205,10 @@ static bool IsTwoPassEnabledByEnv() {
   // Default ON (we want bilinear to be visible) but allow disabling for crash isolation.
   // Accept: 0/1, false/true.
   wchar_t buf[16] = {};
-  DWORD n = GetEnvironmentVariableW(L"HKLM_WRAPPER_DGVOODOO_TWOPASS", buf, (DWORD)(sizeof(buf) / sizeof(buf[0])));
+  DWORD n = GetEnvironmentVariableW(L"TWINSHIM_DGVOODOO_TWOPASS", buf, (DWORD)(sizeof(buf) / sizeof(buf[0])));
+  if (!n || n >= (DWORD)(sizeof(buf) / sizeof(buf[0]))) {
+    n = GetEnvironmentVariableW(L"HKLM_WRAPPER_DGVOODOO_TWOPASS", buf, (DWORD)(sizeof(buf) / sizeof(buf[0])));
+  }
   if (n == 0 || n >= (DWORD)(sizeof(buf) / sizeof(buf[0]))) {
     return true;
   }
@@ -245,13 +251,22 @@ static D3D12_FILTER FilterForMethod(hklmwrap::SurfaceScaleMethod m) {
     case hklmwrap::SurfaceScaleMethod::kBilinear:
       return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     case hklmwrap::SurfaceScaleMethod::kBicubic:
-      // No native bicubic filter in fixed-function sampler; use linear as a safe fallback.
-      // (A custom bicubic shader can be added later.)
+      return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    case hklmwrap::SurfaceScaleMethod::kCatmullRom:
+      return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    case hklmwrap::SurfaceScaleMethod::kLanczos:
+      return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    case hklmwrap::SurfaceScaleMethod::kLanczos3:
+      return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    case hklmwrap::SurfaceScaleMethod::kPixelFast:
       return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     default:
       return D3D12_FILTER_MIN_MAG_MIP_POINT;
   }
 }
+
+struct AdapterState;
+static ID3D12PipelineState* PipelineForMethod(AdapterState& ad, hklmwrap::SurfaceScaleMethod method);
 
 struct SwapchainState {
   UInt32 adapterID = 0;
@@ -291,14 +306,29 @@ struct AdapterState {
   ID3D12RootSignature* rs = nullptr;
   ID3D12PipelineState* psoPoint = nullptr;
   ID3D12PipelineState* psoLinear = nullptr;
+  ID3D12PipelineState* psoCatmullRom = nullptr;
+  ID3D12PipelineState* psoBicubic = nullptr;
+  ID3D12PipelineState* psoLanczos = nullptr;
+  ID3D12PipelineState* psoLanczos3 = nullptr;
+  ID3D12PipelineState* psoPixFast = nullptr;
 
   // Keep shader blobs alive while referenced by dgVoodoo's pipeline cache.
   ID3DBlob* vs = nullptr;
   ID3DBlob* psPoint = nullptr;
   ID3DBlob* psLinear = nullptr;
+  ID3DBlob* psCatmullRom = nullptr;
+  ID3DBlob* psBicubic = nullptr;
+  ID3DBlob* psLanczos = nullptr;
+  ID3DBlob* psLanczos3 = nullptr;
+  ID3DBlob* psPixFast = nullptr;
 
   ID3D12Root::GraphicsPLDesc plDescPoint{};
   ID3D12Root::GraphicsPLDesc plDescLinear{};
+  ID3D12Root::GraphicsPLDesc plDescCatmullRom{};
+  ID3D12Root::GraphicsPLDesc plDescBicubic{};
+  ID3D12Root::GraphicsPLDesc plDescLanczos{};
+  ID3D12Root::GraphicsPLDesc plDescLanczos3{};
+  ID3D12Root::GraphicsPLDesc plDescPixFast{};
 
   ID3D12Buffer* vb = nullptr;
   UInt32 vbPos = 0;
@@ -314,6 +344,25 @@ struct AdapterState {
   // Descriptor allocator handles for our static sampler-free design.
   // (We rely on a static sampler baked into the root signature.)
 };
+
+static ID3D12PipelineState* PipelineForMethod(AdapterState& ad, hklmwrap::SurfaceScaleMethod method) {
+  switch (method) {
+    case hklmwrap::SurfaceScaleMethod::kBilinear:
+      return ad.psoLinear;
+    case hklmwrap::SurfaceScaleMethod::kBicubic:
+      return ad.psoBicubic;
+    case hklmwrap::SurfaceScaleMethod::kCatmullRom:
+      return ad.psoCatmullRom;
+    case hklmwrap::SurfaceScaleMethod::kLanczos:
+      return ad.psoLanczos;
+    case hklmwrap::SurfaceScaleMethod::kLanczos3:
+      return ad.psoLanczos3;
+    case hklmwrap::SurfaceScaleMethod::kPixelFast:
+      return ad.psoPixFast;
+    default:
+      return ad.psoPoint;
+  }
+}
 
 struct Vertex {
   float pX;
@@ -380,6 +429,26 @@ public:
         it->second.psoLinear->Release();
         it->second.psoLinear = nullptr;
       }
+      if (it->second.psoCatmullRom) {
+        it->second.psoCatmullRom->Release();
+        it->second.psoCatmullRom = nullptr;
+      }
+      if (it->second.psoBicubic) {
+        it->second.psoBicubic->Release();
+        it->second.psoBicubic = nullptr;
+      }
+      if (it->second.psoLanczos) {
+        it->second.psoLanczos->Release();
+        it->second.psoLanczos = nullptr;
+      }
+      if (it->second.psoLanczos3) {
+        it->second.psoLanczos3->Release();
+        it->second.psoLanczos3 = nullptr;
+      }
+      if (it->second.psoPixFast) {
+        it->second.psoPixFast->Release();
+        it->second.psoPixFast = nullptr;
+      }
 
       if (it->second.vb) {
         it->second.vb->Release();
@@ -414,6 +483,41 @@ public:
         }
         it->second.psLinear->Release();
         it->second.psLinear = nullptr;
+      }
+      if (it->second.psCatmullRom) {
+        if (root_) {
+          root_->GPLShaderReleased(it->second.adapterID, it->second.psCatmullRom);
+        }
+        it->second.psCatmullRom->Release();
+        it->second.psCatmullRom = nullptr;
+      }
+      if (it->second.psBicubic) {
+        if (root_) {
+          root_->GPLShaderReleased(it->second.adapterID, it->second.psBicubic);
+        }
+        it->second.psBicubic->Release();
+        it->second.psBicubic = nullptr;
+      }
+      if (it->second.psLanczos) {
+        if (root_) {
+          root_->GPLShaderReleased(it->second.adapterID, it->second.psLanczos);
+        }
+        it->second.psLanczos->Release();
+        it->second.psLanczos = nullptr;
+      }
+      if (it->second.psLanczos3) {
+        if (root_) {
+          root_->GPLShaderReleased(it->second.adapterID, it->second.psLanczos3);
+        }
+        it->second.psLanczos3->Release();
+        it->second.psLanczos3 = nullptr;
+      }
+      if (it->second.psPixFast) {
+        if (root_) {
+          root_->GPLShaderReleased(it->second.adapterID, it->second.psPixFast);
+        }
+        it->second.psPixFast->Release();
+        it->second.psPixFast = nullptr;
       }
 
       adapters_.erase(it);
@@ -743,11 +847,15 @@ public:
       const LONG srcRectH = (iCtx.srcRect.bottom > iCtx.srcRect.top) ? (iCtx.srcRect.bottom - iCtx.srcRect.top) : 0;
       const bool srcMatchesPres = (srcRectW > 0 && srcRectH > 0 && (UINT)srcRectW == sc.w && (UINT)srcRectH == sc.h);
 
-      const bool wantTwoPass = (method == hklmwrap::SurfaceScaleMethod::kBilinear) &&
-                               srcMatchesPres &&
-                               (sc.nativeW > 0 && sc.nativeH > 0) &&
-                               (sc.w > sc.nativeW + 1 || sc.h > sc.nativeH + 1) &&
-                               IsTwoPassEnabledByEnv();
+      // If dgVoodoo already expanded the source image to the presentation size, then our draw is 1:1 and
+      // any filtering won't be visible. In that case do a 2-pass filter:
+      //   1) downsample to native size with point sampling
+      //   2) upsample to destination with the requested method
+      const bool wantTwoPassAny = (method != hklmwrap::SurfaceScaleMethod::kPoint) &&
+                  srcMatchesPres &&
+                  (sc.nativeW > 0 && sc.nativeH > 0) &&
+                  (sc.w > sc.nativeW + 1 || sc.h > sc.nativeH + 1) &&
+                  IsTwoPassEnabledByEnv();
 
       {
         static std::atomic<int> logCount{0};
@@ -755,7 +863,7 @@ public:
         if (n <= 10) {
           Tracef(
               "present cfg: wantTwoPass=%d native=%ux%u pres=%ux%u srcRect=%ldx%ld",
-              wantTwoPass ? 1 : 0,
+              wantTwoPassAny ? 1 : 0,
               (unsigned)sc.nativeW,
               (unsigned)sc.nativeH,
               (unsigned)sc.w,
@@ -765,7 +873,9 @@ public:
         }
       }
 
-      if (wantTwoPass) {
+      const bool doTwoPass = wantTwoPassAny;
+
+      if (doTwoPass) {
         static std::atomic<bool> loggedTwoPass{false};
         bool expectedTP = false;
         if (loggedTwoPass.compare_exchange_strong(expectedTP, true)) {
@@ -773,7 +883,7 @@ public:
         }
       }
 
-      if (wantTwoPass) {
+      if (doTwoPass) {
         if (!EnsureNativeResourcesUnlocked(*ad, sc)) {
           Tracef("PresentBegin: EnsureNativeResources failed (native=%ux%u fmt=%u)", (unsigned)sc.nativeW, (unsigned)sc.nativeH, (unsigned)sc.fmt);
           return false;
@@ -826,8 +936,8 @@ public:
       }
 
       cl->SetGraphicsRootSignature(ad->rs);
-      ID3D12PipelineState* psoOnePass = (method == hklmwrap::SurfaceScaleMethod::kBilinear) ? ad->psoLinear : ad->psoPoint;
-      cl->SetPipelineState(psoOnePass);
+      ID3D12PipelineState* psoOnePass = PipelineForMethod(*ad, method);
+      cl->SetPipelineState(psoOnePass ? psoOnePass : ad->psoPoint);
 
       const LONG dstL = iCtx.drawingTarget.dstRect.left;
       const LONG dstT = iCtx.drawingTarget.dstRect.top;
@@ -897,7 +1007,7 @@ public:
 
       const D3D12_VERTEX_BUFFER_VIEW vbv{vbGpu, 4u * (UInt32)sizeof(Vertex), (UInt32)sizeof(Vertex)};
 
-      if (!wantTwoPass) {
+      if (!doTwoPass) {
         cl->IASetVertexBuffers(0, 1, &vbv);
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         cl->DrawInstanced(4, 1, 0, 0);
@@ -989,7 +1099,8 @@ public:
         }
 
         // Pass 2 uses linear PSO (no pipeline rebuild here; avoids mid-frame release/recreate).
-        cl->SetPipelineState(ad->psoLinear);
+        ID3D12PipelineState* psoPass2 = PipelineForMethod(*ad, method);
+        cl->SetPipelineState(psoPass2 ? psoPass2 : ad->psoLinear);
 
         // Restore dst viewport/scissor.
         cl->RSSetViewports(1, &vp);
@@ -1145,7 +1256,10 @@ public:
 
     // Set pipeline.
     cl->SetGraphicsRootSignature(ad->rs);
-    cl->SetPipelineState(method == hklmwrap::SurfaceScaleMethod::kBilinear ? ad->psoLinear : ad->psoPoint);
+    {
+      ID3D12PipelineState* pso = PipelineForMethod(*ad, method);
+      cl->SetPipelineState(pso ? pso : ad->psoPoint);
+    }
 
     // Viewport + scissor to destination rect (handles aspect-ratio letterboxing cases).
     const LONG dstL = iCtx.drawingTarget.dstRect.left;
@@ -1610,7 +1724,7 @@ private:
     if (ad.psoDisabled) {
       return false;
     }
-    if (ad.rs && ad.psoPoint && ad.psoLinear && ad.psoRtvFormat == rtvFormat) {
+    if (ad.rs && ad.psoPoint && ad.psoLinear && ad.psoCatmullRom && ad.psoBicubic && ad.psoLanczos && ad.psoLanczos3 && ad.psoPixFast && ad.psoRtvFormat == rtvFormat) {
       return true;
     }
 
@@ -1622,19 +1736,238 @@ private:
       ad.psoLinear->Release();
       ad.psoLinear = nullptr;
     }
+    if (ad.psoCatmullRom) {
+      ad.psoCatmullRom->Release();
+      ad.psoCatmullRom = nullptr;
+    }
+    if (ad.psoBicubic) {
+      ad.psoBicubic->Release();
+      ad.psoBicubic = nullptr;
+    }
+    if (ad.psoLanczos) {
+      ad.psoLanczos->Release();
+      ad.psoLanczos = nullptr;
+    }
+      if (ad.psLanczos3) {
+        ad.psLanczos3->Release();
+        ad.psLanczos3 = nullptr;
+      }
+    if (ad.psoLanczos3) {
+      ad.psoLanczos3->Release();
+      ad.psoLanczos3 = nullptr;
+    }
+    if (ad.psoPixFast) {
+      ad.psoPixFast->Release();
+      ad.psoPixFast = nullptr;
+    }
 
     // Ensure we have shader blobs; dgVoodoo's pipeline cache uses ID3DBlob pointers.
     static const char* kHlsl =
-        "Texture2D tex0 : register(t0, space1);\n"
-        "SamplerState sampPoint : register(s0);\n"
-        "SamplerState sampLinear : register(s1);\n"
-        "struct VSIn { float2 pos : POSITION; float2 uv : TEXCOORD0; };\n"
-        "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
-        "VSOut VS(VSIn i) { VSOut o; o.pos=float4(i.pos,0.0,1.0); o.uv=i.uv; return o; }\n"
-        "float4 PSPoint(VSOut i) : SV_Target { return tex0.Sample(sampPoint, i.uv); }\n"
-        "float4 PSLinear(VSOut i) : SV_Target { return tex0.Sample(sampLinear, i.uv); }\n";
+      "Texture2D tex0 : register(t0, space1);\n"
+      "SamplerState sampPoint : register(s0);\n"
+      "SamplerState sampLinear : register(s1);\n"
+      "struct VSIn { float2 pos : POSITION; float2 uv : TEXCOORD0; };\n"
+      "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+      "VSOut VS(VSIn i) { VSOut o; o.pos=float4(i.pos,0.0,1.0); o.uv=i.uv; return o; }\n"
+      "static const float PI = 3.14159265358979323846;\n"
+      "float SafeRcp(float v) { return (abs(v) > 1e-7) ? (1.0 / v) : 0.0; }\n"
+      "float CubicKeys(float x, float A) {\n"
+      "  x = abs(x);\n"
+      "  float x2 = x * x;\n"
+      "  float x3 = x2 * x;\n"
+      "  if (x <= 1.0) return (A + 2.0) * x3 - (A + 3.0) * x2 + 1.0;\n"
+      "  if (x <  2.0) return A * x3 - 5.0 * A * x2 + 8.0 * A * x - 4.0 * A;\n"
+      "  return 0.0;\n"
+      "}\n"
+      "float MitchellNetravali(float x) {\n"
+      "  // Mitchell-Netravali with B=C=1/3.\n"
+      "  const float B = 1.0 / 3.0;\n"
+      "  const float C = 1.0 / 3.0;\n"
+      "  x = abs(x);\n"
+      "  float x2 = x * x;\n"
+      "  float x3 = x2 * x;\n"
+      "  if (x < 1.0) {\n"
+      "    return ((12.0 - 9.0*B - 6.0*C) * x3 + (-18.0 + 12.0*B + 6.0*C) * x2 + (6.0 - 2.0*B)) / 6.0;\n"
+      "  }\n"
+      "  if (x < 2.0) {\n"
+      "    return ((-B - 6.0*C) * x3 + (6.0*B + 30.0*C) * x2 + (-12.0*B - 48.0*C) * x + (8.0*B + 24.0*C)) / 6.0;\n"
+      "  }\n"
+      "  return 0.0;\n"
+      "}\n"
+      "float SincPi(float x) {\n"
+      "  float ax = abs(x);\n"
+      "  if (ax < 1e-5) return 1.0;\n"
+      "  float px = PI * x;\n"
+      "  return sin(px) / px;\n"
+      "}\n"
+      "float Lanczos2Weight(float x) {\n"
+      "  x = abs(x);\n"
+      "  if (x >= 2.0) return 0.0;\n"
+      "  return SincPi(x) * SincPi(x * 0.5);\n"
+      "}\n"
+      "float Lanczos3Weight(float x) {\n"
+      "  x = abs(x);\n"
+      "  if (x >= 3.0) return 0.0;\n"
+      "  return SincPi(x) * SincPi(x / 3.0);\n"
+      "}\n"
+      "float4 Sample4TapKernel(float2 uv, float4 wx, float4 wy) {\n"
+      "  uint w, h;\n"
+      "  tex0.GetDimensions(w, h);\n"
+      "  float2 texSize = float2((float)w, (float)h);\n"
+      "  float2 coord = uv * texSize - 0.5;\n"
+      "  float2 base = floor(coord);\n"
+      "  float w01x = wx.x + wx.y;\n"
+      "  float w23x = wx.z + wx.w;\n"
+      "  float w01y = wy.x + wy.y;\n"
+      "  float w23y = wy.z + wy.w;\n"
+      "  float x0 = base.x - 1.0 + wx.y * SafeRcp(w01x);\n"
+      "  float x1 = base.x + 1.0 + wx.w * SafeRcp(w23x);\n"
+      "  float y0 = base.y - 1.0 + wy.y * SafeRcp(w01y);\n"
+      "  float y1 = base.y + 1.0 + wy.w * SafeRcp(w23y);\n"
+      "  float2 uv00 = (float2(x0, y0) + 0.5) / texSize;\n"
+      "  float2 uv10 = (float2(x1, y0) + 0.5) / texSize;\n"
+      "  float2 uv01 = (float2(x0, y1) + 0.5) / texSize;\n"
+      "  float2 uv11 = (float2(x1, y1) + 0.5) / texSize;\n"
+      "  float4 c00 = tex0.SampleLevel(sampLinear, uv00, 0.0);\n"
+      "  float4 c10 = tex0.SampleLevel(sampLinear, uv10, 0.0);\n"
+      "  float4 c01 = tex0.SampleLevel(sampLinear, uv01, 0.0);\n"
+      "  float4 c11 = tex0.SampleLevel(sampLinear, uv11, 0.0);\n"
+      "  float4 sum = c00 * (w01x * w01y) + c10 * (w23x * w01y) + c01 * (w01x * w23y) + c11 * (w23x * w23y);\n"
+      "  float norm = (w01x + w23x) * (w01y + w23y);\n"
+      "  return sum * SafeRcp(max(norm, 1e-6));\n"
+      "}\n"
+      "float4 SampleKeysCubic(float2 uv, float A) {\n"
+      "  uint w, h;\n"
+      "  tex0.GetDimensions(w, h);\n"
+      "  float2 texSize = float2((float)w, (float)h);\n"
+      "  float2 coord = uv * texSize - 0.5;\n"
+      "  float2 f = coord - floor(coord);\n"
+      "  float4 dx = float4(f.x + 1.0, f.x, 1.0 - f.x, 2.0 - f.x);\n"
+      "  float4 dy = float4(f.y + 1.0, f.y, 1.0 - f.y, 2.0 - f.y);\n"
+      "  float4 wx = float4(CubicKeys(dx.x, A), CubicKeys(dx.y, A), CubicKeys(dx.z, A), CubicKeys(dx.w, A));\n"
+      "  float4 wy = float4(CubicKeys(dy.x, A), CubicKeys(dy.y, A), CubicKeys(dy.z, A), CubicKeys(dy.w, A));\n"
+      "  return Sample4TapKernel(uv, wx, wy);\n"
+      "}\n"
+      "float4 SampleMitchell(float2 uv) {\n"
+      "  uint w, h;\n"
+      "  tex0.GetDimensions(w, h);\n"
+      "  float2 texSize = float2((float)w, (float)h);\n"
+      "  float2 coord = uv * texSize - 0.5;\n"
+      "  float2 f = coord - floor(coord);\n"
+      "  float4 dx = float4(f.x + 1.0, f.x, 1.0 - f.x, 2.0 - f.x);\n"
+      "  float4 dy = float4(f.y + 1.0, f.y, 1.0 - f.y, 2.0 - f.y);\n"
+      "  float4 wx = float4(MitchellNetravali(dx.x), MitchellNetravali(dx.y), MitchellNetravali(dx.z), MitchellNetravali(dx.w));\n"
+      "  float4 wy = float4(MitchellNetravali(dy.x), MitchellNetravali(dy.y), MitchellNetravali(dy.z), MitchellNetravali(dy.w));\n"
+      "  return Sample4TapKernel(uv, wx, wy);\n"
+      "}\n"
+      "float4 SampleLanczos2(float2 uv) {\n"
+      "  uint w, h;\n"
+      "  tex0.GetDimensions(w, h);\n"
+      "  float2 texSize = float2((float)w, (float)h);\n"
+      "  float2 coord = uv * texSize - 0.5;\n"
+      "  float2 f = coord - floor(coord);\n"
+      "  float4 dx = float4(f.x + 1.0, f.x, 1.0 - f.x, 2.0 - f.x);\n"
+      "  float4 dy = float4(f.y + 1.0, f.y, 1.0 - f.y, 2.0 - f.y);\n"
+      "  float4 wx = float4(Lanczos2Weight(dx.x), Lanczos2Weight(dx.y), Lanczos2Weight(dx.z), Lanczos2Weight(dx.w));\n"
+      "  float4 wy = float4(Lanczos2Weight(dy.x), Lanczos2Weight(dy.y), Lanczos2Weight(dy.z), Lanczos2Weight(dy.w));\n"
+      "  return Sample4TapKernel(uv, wx, wy);\n"
+      "}\n"
+      "float4 SampleLanczos3(float2 uv) {\n"
+      "  uint w, h;\n"
+      "  tex0.GetDimensions(w, h);\n"
+      "  float2 texSize = float2((float)w, (float)h);\n"
+      "  float2 coord = uv * texSize - 0.5;\n"
+      "  float2 base = floor(coord);\n"
+      "  float2 f = coord - base;\n"
+      "  float wx0 = Lanczos3Weight(f.x + 2.0);\n"
+      "  float wx1 = Lanczos3Weight(f.x + 1.0);\n"
+      "  float wx2 = Lanczos3Weight(f.x);\n"
+      "  float wx3 = Lanczos3Weight(1.0 - f.x);\n"
+      "  float wx4 = Lanczos3Weight(2.0 - f.x);\n"
+      "  float wx5 = Lanczos3Weight(3.0 - f.x);\n"
+      "  float wy0 = Lanczos3Weight(f.y + 2.0);\n"
+      "  float wy1 = Lanczos3Weight(f.y + 1.0);\n"
+      "  float wy2 = Lanczos3Weight(f.y);\n"
+      "  float wy3 = Lanczos3Weight(1.0 - f.y);\n"
+      "  float wy4 = Lanczos3Weight(2.0 - f.y);\n"
+      "  float wy5 = Lanczos3Weight(3.0 - f.y);\n"
+      "  float wx01 = wx0 + wx1;\n"
+      "  float wx23 = wx2 + wx3;\n"
+      "  float wx45 = wx4 + wx5;\n"
+      "  float wy01 = wy0 + wy1;\n"
+      "  float wy23 = wy2 + wy3;\n"
+      "  float wy45 = wy4 + wy5;\n"
+      "  float x0 = base.x - 2.0 + wx1 * SafeRcp(wx01);\n"
+      "  float x1 = base.x + 0.0 + wx3 * SafeRcp(wx23);\n"
+      "  float x2 = base.x + 2.0 + wx5 * SafeRcp(wx45);\n"
+      "  float y0 = base.y - 2.0 + wy1 * SafeRcp(wy01);\n"
+      "  float y1 = base.y + 0.0 + wy3 * SafeRcp(wy23);\n"
+      "  float y2 = base.y + 2.0 + wy5 * SafeRcp(wy45);\n"
+      "  float2 uv00 = (float2(x0, y0) + 0.5) / texSize;\n"
+      "  float2 uv10 = (float2(x1, y0) + 0.5) / texSize;\n"
+      "  float2 uv20 = (float2(x2, y0) + 0.5) / texSize;\n"
+      "  float2 uv01 = (float2(x0, y1) + 0.5) / texSize;\n"
+      "  float2 uv11 = (float2(x1, y1) + 0.5) / texSize;\n"
+      "  float2 uv21 = (float2(x2, y1) + 0.5) / texSize;\n"
+      "  float2 uv02 = (float2(x0, y2) + 0.5) / texSize;\n"
+      "  float2 uv12 = (float2(x1, y2) + 0.5) / texSize;\n"
+      "  float2 uv22 = (float2(x2, y2) + 0.5) / texSize;\n"
+      "  float4 c00 = tex0.SampleLevel(sampLinear, uv00, 0.0);\n"
+      "  float4 c10 = tex0.SampleLevel(sampLinear, uv10, 0.0);\n"
+      "  float4 c20 = tex0.SampleLevel(sampLinear, uv20, 0.0);\n"
+      "  float4 c01 = tex0.SampleLevel(sampLinear, uv01, 0.0);\n"
+      "  float4 c11 = tex0.SampleLevel(sampLinear, uv11, 0.0);\n"
+      "  float4 c21 = tex0.SampleLevel(sampLinear, uv21, 0.0);\n"
+      "  float4 c02 = tex0.SampleLevel(sampLinear, uv02, 0.0);\n"
+      "  float4 c12 = tex0.SampleLevel(sampLinear, uv12, 0.0);\n"
+      "  float4 c22 = tex0.SampleLevel(sampLinear, uv22, 0.0);\n"
+      "  float4 row0 = c00 * wx01 + c10 * wx23 + c20 * wx45;\n"
+      "  float4 row1 = c01 * wx01 + c11 * wx23 + c21 * wx45;\n"
+      "  float4 row2 = c02 * wx01 + c12 * wx23 + c22 * wx45;\n"
+      "  float4 sum = row0 * wy01 + row1 * wy23 + row2 * wy45;\n"
+      "  float norm = (wx01 + wx23 + wx45) * (wy01 + wy23 + wy45);\n"
+      "  return sum * SafeRcp(max(norm, 1e-6));\n"
+      "}\n"
+      "float Luma(float3 rgb) { return dot(rgb, float3(0.299, 0.587, 0.114)); }\n"
+      "float4 SamplePixFast(float2 uv) {\n"
+      "  uint w, h;\n"
+      "  tex0.GetDimensions(w, h);\n"
+      "  int2 sz = int2((int)w, (int)h);\n"
+      "  float2 coord = uv * float2(sz) - 0.5;\n"
+      "  int2 base = int2(floor(coord));\n"
+      "  float2 f = coord - float2(base);\n"
+      "  int2 p00 = clamp(base, int2(0,0), sz - 1);\n"
+      "  int2 p10 = clamp(base + int2(1,0), int2(0,0), sz - 1);\n"
+      "  int2 p01 = clamp(base + int2(0,1), int2(0,0), sz - 1);\n"
+      "  int2 p11 = clamp(base + int2(1,1), int2(0,0), sz - 1);\n"
+      "  float4 c00 = tex0.Load(int3(p00, 0));\n"
+      "  float4 c10 = tex0.Load(int3(p10, 0));\n"
+      "  float4 c01 = tex0.Load(int3(p01, 0));\n"
+      "  float4 c11 = tex0.Load(int3(p11, 0));\n"
+      "  float4 cx0 = lerp(c00, c10, f.x);\n"
+      "  float4 cx1 = lerp(c01, c11, f.x);\n"
+      "  float4 bil = lerp(cx0, cx1, f.y);\n"
+      "  float sx = step(0.5, f.x);\n"
+      "  float sy = step(0.5, f.y);\n"
+      "  float4 nx0 = lerp(c00, c10, sx);\n"
+      "  float4 nx1 = lerp(c01, c11, sx);\n"
+      "  float4 nearest = lerp(nx0, nx1, sy);\n"
+      "  float e0 = abs(Luma(c00.rgb) - Luma(c11.rgb));\n"
+      "  float e1 = abs(Luma(c10.rgb) - Luma(c01.rgb));\n"
+      "  float edge = max(e0, e1);\n"
+      "  // Blend toward nearest on sharp edges to preserve pixel-art crispness.\n"
+      "  float t = saturate((edge - 0.08) * 12.0);\n"
+      "  return lerp(bil, nearest, t);\n"
+      "}\n"
+      "float4 PSPoint(VSOut i) : SV_Target { return tex0.Sample(sampPoint, i.uv); }\n"
+      "float4 PSLinear(VSOut i) : SV_Target { return tex0.Sample(sampLinear, i.uv); }\n"
+      "float4 PSCatmullRom(VSOut i) : SV_Target { return SampleKeysCubic(i.uv, -0.5); }\n"
+      "float4 PSBicubic(VSOut i) : SV_Target { return SampleMitchell(i.uv); }\n"
+      "float4 PSLanczos(VSOut i) : SV_Target { return SampleLanczos2(i.uv); }\n"
+      "float4 PSLanczos3(VSOut i) : SV_Target { return SampleLanczos3(i.uv); }\n"
+      "float4 PSPixFast(VSOut i) : SV_Target { return SamplePixFast(i.uv); }\n";
 
-    if (!ad.vs || !ad.psPoint || !ad.psLinear) {
+    if (!ad.vs || !ad.psPoint || !ad.psLinear || !ad.psCatmullRom || !ad.psBicubic || !ad.psLanczos || !ad.psLanczos3 || !ad.psPixFast) {
       if (ad.vs) {
         ad.vs->Release();
         ad.vs = nullptr;
@@ -1647,14 +1980,41 @@ private:
         ad.psLinear->Release();
         ad.psLinear = nullptr;
       }
+      if (ad.psCatmullRom) {
+        ad.psCatmullRom->Release();
+        ad.psCatmullRom = nullptr;
+      }
+      if (ad.psBicubic) {
+        ad.psBicubic->Release();
+        ad.psBicubic = nullptr;
+      }
+      if (ad.psLanczos) {
+        ad.psLanczos->Release();
+        ad.psLanczos = nullptr;
+      }
+      if (ad.psLanczos3) {
+        ad.psLanczos3->Release();
+        ad.psLanczos3 = nullptr;
+      }
+      if (ad.psPixFast) {
+        ad.psPixFast->Release();
+        ad.psPixFast = nullptr;
+      }
 
       // Compile via D3DCompiler then clone into dgVoodoo-created blobs.
       // (The SDK sample uses ID3D12Root::CreateD3DBlob; using it here improves compatibility.)
       ID3DBlob* tmpVs = nullptr;
       ID3DBlob* tmpPsPoint = nullptr;
       ID3DBlob* tmpPsLinear = nullptr;
+      ID3DBlob* tmpPsCr = nullptr;
+      ID3DBlob* tmpPsBic = nullptr;
+        ID3DBlob* tmpPsLan = nullptr;
+        ID3DBlob* tmpPsLan3 = nullptr;
+      ID3DBlob* tmpPsPix = nullptr;
       if (!CompileHlsl(kHlsl, "VS", "vs_5_1", &tmpVs) || !CompileHlsl(kHlsl, "PSPoint", "ps_5_1", &tmpPsPoint) ||
-          !CompileHlsl(kHlsl, "PSLinear", "ps_5_1", &tmpPsLinear)) {
+          !CompileHlsl(kHlsl, "PSLinear", "ps_5_1", &tmpPsLinear) || !CompileHlsl(kHlsl, "PSCatmullRom", "ps_5_1", &tmpPsCr) ||
+          !CompileHlsl(kHlsl, "PSBicubic", "ps_5_1", &tmpPsBic) || !CompileHlsl(kHlsl, "PSLanczos", "ps_5_1", &tmpPsLan) ||
+          !CompileHlsl(kHlsl, "PSLanczos3", "ps_5_1", &tmpPsLan3) || !CompileHlsl(kHlsl, "PSPixFast", "ps_5_1", &tmpPsPix)) {
         if (tmpVs) {
           tmpVs->Release();
         }
@@ -1664,6 +2024,21 @@ private:
         if (tmpPsLinear) {
           tmpPsLinear->Release();
         }
+        if (tmpPsCr) {
+          tmpPsCr->Release();
+        }
+        if (tmpPsBic) {
+          tmpPsBic->Release();
+        }
+        if (tmpPsLan) {
+          tmpPsLan->Release();
+        }
+        if (tmpPsLan3) {
+          tmpPsLan3->Release();
+        }
+        if (tmpPsPix) {
+          tmpPsPix->Release();
+        }
         Tracef("shader compile unavailable (d3dcompiler missing?)");
         return false;
       }
@@ -1671,12 +2046,22 @@ private:
       ad.vs = root_->CreateD3DBlob((UIntPtr)tmpVs->GetBufferSize(), tmpVs->GetBufferPointer());
       ad.psPoint = root_->CreateD3DBlob((UIntPtr)tmpPsPoint->GetBufferSize(), tmpPsPoint->GetBufferPointer());
       ad.psLinear = root_->CreateD3DBlob((UIntPtr)tmpPsLinear->GetBufferSize(), tmpPsLinear->GetBufferPointer());
+      ad.psCatmullRom = root_->CreateD3DBlob((UIntPtr)tmpPsCr->GetBufferSize(), tmpPsCr->GetBufferPointer());
+      ad.psBicubic = root_->CreateD3DBlob((UIntPtr)tmpPsBic->GetBufferSize(), tmpPsBic->GetBufferPointer());
+      ad.psLanczos = root_->CreateD3DBlob((UIntPtr)tmpPsLan->GetBufferSize(), tmpPsLan->GetBufferPointer());
+      ad.psLanczos3 = root_->CreateD3DBlob((UIntPtr)tmpPsLan3->GetBufferSize(), tmpPsLan3->GetBufferPointer());
+      ad.psPixFast = root_->CreateD3DBlob((UIntPtr)tmpPsPix->GetBufferSize(), tmpPsPix->GetBufferPointer());
 
       tmpVs->Release();
       tmpPsPoint->Release();
       tmpPsLinear->Release();
+      tmpPsCr->Release();
+      tmpPsBic->Release();
+      tmpPsLan->Release();
+      tmpPsLan3->Release();
+      tmpPsPix->Release();
 
-      if (!ad.vs || !ad.psPoint || !ad.psLinear) {
+      if (!ad.vs || !ad.psPoint || !ad.psLinear || !ad.psCatmullRom || !ad.psBicubic || !ad.psLanczos || !ad.psLanczos3 || !ad.psPixFast) {
         if (ad.vs) {
           ad.vs->Release();
           ad.vs = nullptr;
@@ -1688,6 +2073,26 @@ private:
         if (ad.psLinear) {
           ad.psLinear->Release();
           ad.psLinear = nullptr;
+        }
+        if (ad.psCatmullRom) {
+          ad.psCatmullRom->Release();
+          ad.psCatmullRom = nullptr;
+        }
+        if (ad.psBicubic) {
+          ad.psBicubic->Release();
+          ad.psBicubic = nullptr;
+        }
+        if (ad.psLanczos) {
+          ad.psLanczos->Release();
+          ad.psLanczos = nullptr;
+        }
+        if (ad.psLanczos3) {
+          ad.psLanczos3->Release();
+          ad.psLanczos3 = nullptr;
+        }
+        if (ad.psPixFast) {
+          ad.psPixFast->Release();
+          ad.psPixFast = nullptr;
         }
         Tracef("CreateD3DBlob failed for compiled shaders");
         return false;
@@ -1843,7 +2248,32 @@ private:
     ad.plDescLinear = pl;
     ad.psoLinear = root_->PLCacheGetGraphicsPipeline(ad.adapterID, ad.plDescLinear);
 
-    if (!ad.psoPoint || !ad.psoLinear) {
+    // Catmull-Rom cubic (Keys A=-0.5)
+    pl.pPS = ad.psCatmullRom;
+    ad.plDescCatmullRom = pl;
+    ad.psoCatmullRom = root_->PLCacheGetGraphicsPipeline(ad.adapterID, ad.plDescCatmullRom);
+
+    // Bicubic (Mitchell-Netravali)
+    pl.pPS = ad.psBicubic;
+    ad.plDescBicubic = pl;
+    ad.psoBicubic = root_->PLCacheGetGraphicsPipeline(ad.adapterID, ad.plDescBicubic);
+
+    // Lanczos2
+    pl.pPS = ad.psLanczos;
+    ad.plDescLanczos = pl;
+    ad.psoLanczos = root_->PLCacheGetGraphicsPipeline(ad.adapterID, ad.plDescLanczos);
+
+    // Lanczos3
+    pl.pPS = ad.psLanczos3;
+    ad.plDescLanczos3 = pl;
+    ad.psoLanczos3 = root_->PLCacheGetGraphicsPipeline(ad.adapterID, ad.plDescLanczos3);
+
+    // PixFast (edge-aware bilinear)
+    pl.pPS = ad.psPixFast;
+    ad.plDescPixFast = pl;
+    ad.psoPixFast = root_->PLCacheGetGraphicsPipeline(ad.adapterID, ad.plDescPixFast);
+
+    if (!ad.psoPoint || !ad.psoLinear || !ad.psoCatmullRom || !ad.psoBicubic || !ad.psoLanczos || !ad.psoLanczos3 || !ad.psoPixFast) {
       {
         static std::atomic<bool> loggedOnce{false};
         bool expected = false;
@@ -1851,8 +2281,13 @@ private:
           const size_t vsSz = pl.pVS ? (size_t)pl.pVS->GetBufferSize() : 0;
           const size_t ps0Sz = ad.psPoint ? (size_t)ad.psPoint->GetBufferSize() : 0;
           const size_t ps1Sz = ad.psLinear ? (size_t)ad.psLinear->GetBufferSize() : 0;
+          const size_t psCrSz = ad.psCatmullRom ? (size_t)ad.psCatmullRom->GetBufferSize() : 0;
+          const size_t psBicSz = ad.psBicubic ? (size_t)ad.psBicubic->GetBufferSize() : 0;
+          const size_t psLanSz = ad.psLanczos ? (size_t)ad.psLanczos->GetBufferSize() : 0;
+          const size_t psLan3Sz = ad.psLanczos3 ? (size_t)ad.psLanczos3->GetBufferSize() : 0;
+          const size_t psPixSz = ad.psPixFast ? (size_t)ad.psPixFast->GetBufferSize() : 0;
           Tracef(
-              "PSO cache failure detail: rtvFmt=%u rs=%p vs=%p(v=%zu) psPoint=%p(v=%zu) psLin=%p(v=%zu) blend=%p rast=%p ds=%p il=%p topo=%u numRT=%u samp=(%u,%u)",
+              "PSO cache failure detail: rtvFmt=%u rs=%p vs=%p(v=%zu) psPoint=%p(v=%zu) psLin=%p(v=%zu) psCR=%p(v=%zu) psBic=%p(v=%zu) psLan=%p(v=%zu) psLan3=%p(v=%zu) psPix=%p(v=%zu) blend=%p rast=%p ds=%p il=%p topo=%u numRT=%u samp=(%u,%u)",
               (unsigned)rtvFormat,
               (void*)pl.pRootSignature,
               (void*)pl.pVS,
@@ -1861,6 +2296,16 @@ private:
               ps0Sz,
               (void*)ad.psLinear,
               ps1Sz,
+              (void*)ad.psCatmullRom,
+              psCrSz,
+              (void*)ad.psBicubic,
+              psBicSz,
+              (void*)ad.psLanczos,
+              psLanSz,
+              (void*)ad.psLanczos3,
+              psLan3Sz,
+              (void*)ad.psPixFast,
+              psPixSz,
               (void*)pl.pBlendState,
               (void*)pl.pRasterizerState,
               (void*)pl.pDepthStencilState,
@@ -1872,13 +2317,18 @@ private:
         }
       }
       // Best-effort diagnostics: if any descriptor pointer is null, this is likely the root cause.
-      if (!pl.pRootSignature || !pl.pVS || !ad.psPoint || !ad.psLinear || !pl.pBlendState || !pl.pRasterizerState || !pl.pDepthStencilState) {
+      if (!pl.pRootSignature || !pl.pVS || !ad.psPoint || !ad.psLinear || !ad.psCatmullRom || !ad.psBicubic || !ad.psLanczos || !ad.psLanczos3 || !ad.psPixFast || !pl.pBlendState || !pl.pRasterizerState || !pl.pDepthStencilState) {
         Tracef(
-            "pipeline desc has nulls (rs=%p vs=%p psPoint=%p psLin=%p blend=%p rast=%p ds=%p il=%p)",
+            "pipeline desc has nulls (rs=%p vs=%p psPoint=%p psLin=%p psCR=%p psBic=%p psLan=%p psLan3=%p psPix=%p blend=%p rast=%p ds=%p il=%p)",
             (void*)pl.pRootSignature,
             (void*)pl.pVS,
             (void*)ad.psPoint,
             (void*)ad.psLinear,
+            (void*)ad.psCatmullRom,
+            (void*)ad.psBicubic,
+            (void*)ad.psLanczos,
+            (void*)ad.psLanczos3,
+            (void*)ad.psPixFast,
             (void*)pl.pBlendState,
             (void*)pl.pRasterizerState,
             (void*)pl.pDepthStencilState,
@@ -1925,7 +2375,7 @@ private:
 static D3D12Observer g_observer;
 static dgVoodoo::IAddonMainCallback* g_main = nullptr;
 
-static const char* kAddonBuildId = "hklm-wrapper SampleAddon (rev=ringbuf-11-dualpso) " __DATE__ " " __TIME__;
+static const char* kAddonBuildId = "TwinShim SampleAddon (rev=ringbuf-11-dualpso) " __DATE__ " " __TIME__;
 
 static bool AddonInitCommon(dgVoodoo::IAddonMainCallback* pAddonMain) {
   g_main = pAddonMain;

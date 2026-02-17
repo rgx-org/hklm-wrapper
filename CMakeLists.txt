@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(hklm_wrapper LANGUAGES C CXX)
+project(TwinShim LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -121,10 +121,10 @@ else()
 
   add_library(hklm_shim SHARED
     src/shim/dllmain.cpp
-    src/shim/d3d9_surface_doubling.cpp
-    src/shim/d3d9_surface_doubling.h
-    src/shim/ddraw_surface_doubling.cpp
-    src/shim/ddraw_surface_doubling.h
+    src/shim/d3d9_surface_scaler.cpp
+    src/shim/d3d9_surface_scaler.h
+    src/shim/ddraw_surface_scaler.cpp
+    src/shim/ddraw_surface_scaler.h
     src/shim/surface_scale_config.cpp
     src/shim/surface_scale_config.h
     src/shim/minhook_runtime.cpp
@@ -139,7 +139,7 @@ else()
     src/shim/registry_hooks_utils.cpp
     src/shim/registry_hooks_utils.h
   )
-  set_target_properties(hklm_shim PROPERTIES PREFIX "")
+  set_target_properties(hklm_shim PROPERTIES PREFIX "" OUTPUT_NAME "twinshim_shim")
 
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(hklm_shim PRIVATE -fpermissive)
@@ -195,6 +195,7 @@ else()
     src/wrapper/process_inject.cpp
     src/wrapper/process_inject.h
   )
+  set_target_properties(hklm_wrapper PROPERTIES OUTPUT_NAME "twinshim")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_options(hklm_wrapper PRIVATE -municode)
   endif()
@@ -206,6 +207,7 @@ else()
     src/wrapper/process_inject.cpp
     src/wrapper/process_inject.h
   )
+  set_target_properties(hklm_wrapper_cli PROPERTIES OUTPUT_NAME "twinshim_cli")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_options(hklm_wrapper_cli PRIVATE -municode)
   endif()

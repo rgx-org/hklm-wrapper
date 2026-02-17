@@ -8,6 +8,10 @@ enum class SurfaceScaleMethod {
   kPoint = 0,
   kBilinear = 1,
   kBicubic = 2,
+  kCatmullRom = 3,
+  kLanczos = 4,
+  kLanczos3 = 5,
+  kPixelFast = 6,
 };
 
 struct SurfaceScaleConfig {
@@ -27,7 +31,7 @@ struct SurfaceScaleConfig {
 // Parses the *target process* command line (GetCommandLineW) once and returns a cached result.
 // Recognized options:
 //   --scale <1.1-100>
-//   --scale-method <point|bilinear|bicubic>
+//   --scale-method <point|bilinear|bicubic|catmull-rom|cr|lanczos|lanczos3|pixfast>
 // Also supports --scale=<...> and --scale-method=<...>.
 const SurfaceScaleConfig& GetSurfaceScaleConfig();
 

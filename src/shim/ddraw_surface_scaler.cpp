@@ -1,4 +1,4 @@
-#include "shim/ddraw_surface_doubling.h"
+#include "shim/ddraw_surface_scaler.h"
 
 #include "shim/surface_scale_config.h"
 
@@ -143,7 +143,10 @@ static void TraceWrite(const char* text) {
   OutputDebugStringA(text);
 
   wchar_t pipeBuf[512] = {};
-  DWORD pipeLen = GetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  DWORD pipeLen = GetEnvironmentVariableW(L"TWINSHIM_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  if (!pipeLen || pipeLen >= (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0]))) {
+    pipeLen = GetEnvironmentVariableW(L"HKLM_WRAPPER_DEBUG_PIPE", pipeBuf, (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0])));
+  }
   if (!pipeLen || pipeLen >= (DWORD)(sizeof(pipeBuf) / sizeof(pipeBuf[0]))) {
     return;
   }
@@ -498,7 +501,9 @@ class DDrawD3D9Scaler {
     if (!srcSurf || !hwnd || dstW == 0 || dstH == 0) {
       return false;
     }
-    if (method != SurfaceScaleMethod::kBilinear && method != SurfaceScaleMethod::kBicubic) {
+    const bool wantLinear = (method == SurfaceScaleMethod::kBilinear || method == SurfaceScaleMethod::kPixelFast);
+    const bool wantCubic = (method == SurfaceScaleMethod::kBicubic || method == SurfaceScaleMethod::kCatmullRom || method == SurfaceScaleMethod::kLanczos || method == SurfaceScaleMethod::kLanczos3);
+    if (!wantLinear && !wantCubic) {
       return false;
     }
 
@@ -534,7 +539,7 @@ class DDrawD3D9Scaler {
     }
 
     HRESULT hr = D3D_OK;
-    if (method == SurfaceScaleMethod::kBilinear) {
+    if (wantLinear) {
       hr = RenderSinglePassUnlocked(srcTex_, dstW, dstH, /*linear=*/true);
       if (SUCCEEDED(hr)) {
         hr = dev_->Present(nullptr, nullptr, nullptr, nullptr);
@@ -1476,7 +1481,7 @@ static bool EnsureDD7MethodHooksInstalled(LPDIRECTDRAW7 dd7) {
   return true;
 }
 
-static bool InstallDDrawSurfaceDoublingHooksOnce() {
+static bool InstallDDrawSurfaceScalerHooksOnce() {
   const SurfaceScaleConfig& cfg = GetSurfaceScaleConfig();
   if (!IsScalingEnabled()) {
     if (cfg.scaleSpecified && !cfg.scaleValid) {
@@ -1538,7 +1543,7 @@ static DWORD WINAPI DDrawInitThreadProc(LPVOID) {
   }
 
   if (!g_stopInitThread.load(std::memory_order_acquire)) {
-    const bool ok = InstallDDrawSurfaceDoublingHooksOnce();
+    const bool ok = InstallDDrawSurfaceScalerHooksOnce();
     Tracef("init thread finished (ok=%d)", ok ? 1 : 0);
   }
   return 0;
@@ -1738,16 +1743,8 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_Flip(LPDIRECTDRAWSURFACE7 primary, LP
   }
 
   HRESULT hr = DDERR_GENERIC;
-  const bool forcedPointFallback = false;
-  const bool usePointPath = (cfg.method == SurfaceScaleMethod::kPoint) || forcedPointFallback;
+  const bool usePointPath = (cfg.method == SurfaceScaleMethod::kPoint);
   if (usePointPath) {
-    if (forcedPointFallback) {
-      static std::atomic<bool> logged{false};
-      bool expected = false;
-      if (logged.compare_exchange_strong(expected, true)) {
-        Tracef("Flip: wrapper ddraw detected; using point fallback until DXGI post-filter activates (requested=%ls)", SurfaceScaleMethodToString(cfg.method));
-      }
-    }
     // Try to avoid introducing extra latency: don't force DDBLT_WAIT.
     // If the blit can't be scheduled immediately, do a one-time blocking fallback
     // to avoid intermittent unscaled presents.
@@ -1989,7 +1986,7 @@ static HRESULT STDMETHODCALLTYPE Hook_DDS7_BltFast(LPDIRECTDRAWSURFACE7 self,
 
 }
 
-bool InstallDDrawSurfaceDoublingHooks() {
+bool InstallDDrawSurfaceScalerHooks() {
   if (!IsScalingEnabled()) {
     g_active.store(false, std::memory_order_release);
     return true;
@@ -2026,11 +2023,11 @@ bool InstallDDrawSurfaceDoublingHooks() {
   return true;
 }
 
-bool AreDDrawSurfaceDoublingHooksActive() {
+bool AreDDrawSurfaceScalerHooksActive() {
   return g_active.load(std::memory_order_acquire);
 }
 
-void RemoveDDrawSurfaceDoublingHooks() {
+void RemoveDDrawSurfaceScalerHooks() {
   if (!g_active.exchange(false, std::memory_order_acq_rel)) {
     return;
   }

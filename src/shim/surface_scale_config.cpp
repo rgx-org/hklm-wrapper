@@ -53,7 +53,10 @@ static bool ParseSurfaceScaleConfigFromCommandLine(SurfaceScaleConfig* out) {
   // scale settings even if command-line parsing is impacted by third-party code.
   {
     wchar_t scaleBuf[128] = {};
-    DWORD n = GetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE", scaleBuf, (DWORD)(sizeof(scaleBuf) / sizeof(scaleBuf[0])));
+    DWORD n = GetEnvironmentVariableW(L"TWINSHIM_SCALE", scaleBuf, (DWORD)(sizeof(scaleBuf) / sizeof(scaleBuf[0])));
+    if (!n || n >= (DWORD)(sizeof(scaleBuf) / sizeof(scaleBuf[0]))) {
+      n = GetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE", scaleBuf, (DWORD)(sizeof(scaleBuf) / sizeof(scaleBuf[0])));
+    }
     if (n && n < (DWORD)(sizeof(scaleBuf) / sizeof(scaleBuf[0]))) {
       scaleBuf[n] = L'\0';
       out->scaleSpecified = true;
@@ -70,7 +73,10 @@ static bool ParseSurfaceScaleConfigFromCommandLine(SurfaceScaleConfig* out) {
   }
   {
     wchar_t methodBuf[128] = {};
-    DWORD n = GetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE_METHOD", methodBuf, (DWORD)(sizeof(methodBuf) / sizeof(methodBuf[0])));
+    DWORD n = GetEnvironmentVariableW(L"TWINSHIM_SCALE_METHOD", methodBuf, (DWORD)(sizeof(methodBuf) / sizeof(methodBuf[0])));
+    if (!n || n >= (DWORD)(sizeof(methodBuf) / sizeof(methodBuf[0]))) {
+      n = GetEnvironmentVariableW(L"HKLM_WRAPPER_SCALE_METHOD", methodBuf, (DWORD)(sizeof(methodBuf) / sizeof(methodBuf[0])));
+    }
     if (n && n < (DWORD)(sizeof(methodBuf) / sizeof(methodBuf[0]))) {
       methodBuf[n] = L'\0';
       out->methodSpecified = true;
@@ -82,6 +88,14 @@ static bool ParseSurfaceScaleConfigFromCommandLine(SurfaceScaleConfig* out) {
         out->method = SurfaceScaleMethod::kBilinear;
       } else if (lower == L"bicubic") {
         out->method = SurfaceScaleMethod::kBicubic;
+      } else if (lower == L"catmull-rom" || lower == L"catmullrom" || lower == L"cr") {
+        out->method = SurfaceScaleMethod::kCatmullRom;
+      } else if (lower == L"lanczos" || lower == L"lanczos2") {
+        out->method = SurfaceScaleMethod::kLanczos;
+      } else if (lower == L"lanczos3") {
+        out->method = SurfaceScaleMethod::kLanczos3;
+      } else if (lower == L"pixfast" || lower == L"pixel" || lower == L"pix") {
+        out->method = SurfaceScaleMethod::kPixelFast;
       } else {
         out->methodValid = false;
       }
@@ -145,6 +159,14 @@ static bool ParseSurfaceScaleConfigFromCommandLine(SurfaceScaleConfig* out) {
         out->method = SurfaceScaleMethod::kBilinear;
       } else if (lower == L"bicubic") {
         out->method = SurfaceScaleMethod::kBicubic;
+      } else if (lower == L"catmull-rom" || lower == L"catmullrom" || lower == L"cr") {
+        out->method = SurfaceScaleMethod::kCatmullRom;
+      } else if (lower == L"lanczos" || lower == L"lanczos2") {
+        out->method = SurfaceScaleMethod::kLanczos;
+      } else if (lower == L"lanczos3") {
+        out->method = SurfaceScaleMethod::kLanczos3;
+      } else if (lower == L"pixfast" || lower == L"pixel" || lower == L"pix") {
+        out->method = SurfaceScaleMethod::kPixelFast;
       } else {
         out->methodValid = false;
       }
@@ -186,6 +208,14 @@ const wchar_t* SurfaceScaleMethodToString(SurfaceScaleMethod m) {
       return L"bilinear";
     case SurfaceScaleMethod::kBicubic:
       return L"bicubic";
+    case SurfaceScaleMethod::kCatmullRom:
+      return L"catmull-rom";
+    case SurfaceScaleMethod::kLanczos:
+      return L"lanczos";
+    case SurfaceScaleMethod::kLanczos3:
+      return L"lanczos3";
+    case SurfaceScaleMethod::kPixelFast:
+      return L"pixfast";
     default:
       return L"unknown";
   }
