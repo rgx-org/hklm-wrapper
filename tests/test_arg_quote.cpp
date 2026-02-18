@@ -4,7 +4,7 @@
 
 #include <vector>
 
-using namespace hklmwrap;
+using namespace twinshim;
 
 TEST_CASE("QuoteWindowsCommandLineArg handles basic quoting", "[arg_quote]") {
   CHECK(QuoteWindowsCommandLineArg(L"") == L"\"\"");

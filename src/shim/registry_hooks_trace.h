@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace hklmwrap {
+namespace twinshim {
 
 class InternalDispatchGuard {
  public:
@@ -14,6 +14,10 @@ class InternalDispatchGuard {
 
 std::wstring FormatRegType(DWORD type);
 std::wstring FormatValuePreview(DWORD type, const BYTE* data, DWORD cbData);
+
+// Returns true when registry API tracing is enabled for the given API name.
+// This is intended for guarding expensive debug string construction at call sites.
+bool IsRegistryTraceEnabledForApi(const wchar_t* apiName);
 
 void TraceApiEvent(const wchar_t* apiName,
                    const wchar_t* opType,

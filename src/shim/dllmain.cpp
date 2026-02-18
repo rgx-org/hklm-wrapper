@@ -2,6 +2,8 @@
 
 #include "shim/d3d9_surface_scaler.h"
 #include "shim/ddraw_surface_scaler.h"
+#include "shim/mouse_scale_hooks.h"
+#include "shim/surface_scale_config.h"
 
 #include <windows.h>
 
@@ -78,19 +80,30 @@ HANDLE g_hookInitThread = nullptr;
 DWORD WINAPI HookInitThreadProc(LPVOID) {
   ShimTrace("[shim] hook init thread started\n");
 
-  const bool installed = hklmwrap::InstallRegistryHooks();
+  const bool installed = twinshim::InstallRegistryHooks();
 
-  // Install optional D3D9 Present scaling hooks (best-effort, async).
-  (void)hklmwrap::InstallD3D9SurfaceScalerHooks();
+  // Only attempt graphics hook installation when a valid --scale was provided.
+  // (Avoids any graphics-module probing/threads when scaling isn't requested.)
+  {
+    const twinshim::SurfaceScaleConfig& cfg = twinshim::GetSurfaceScaleConfig();
+    const bool scalingEnabled = cfg.enabled && cfg.scaleValid && (cfg.factor >= 1.1 && cfg.factor <= 100.0);
+    if (scalingEnabled) {
+      // Install mouse coordinate mapping so cursor movement stays consistent with scaled presentation.
+      (void)twinshim::InstallMouseScaleHooks();
 
-  // Install optional DirectDraw scaling hooks (system ddraw.dll paths only).
-  (void)hklmwrap::InstallDDrawSurfaceScalerHooks();
+      // Install optional D3D9 Present scaling hooks (best-effort, async).
+      (void)twinshim::InstallD3D9SurfaceScalerHooks();
+
+      // Install optional DirectDraw scaling hooks (system ddraw.dll paths only).
+      (void)twinshim::InstallDDrawSurfaceScalerHooks();
+    }
+  }
 
   if (!installed) {
     InterlockedExchange(&g_hooksInstalled, -1);
     ShimTrace("[shim] hook install failed\n");
     SignalHookReadyEvent();
-  } else if (hklmwrap::AreRegistryHooksActive()) {
+  } else if (twinshim::AreRegistryHooksActive()) {
     InterlockedExchange(&g_hooksInstalled, 1);
     ShimTrace("[shim] hook install succeeded\n");
     SignalHookReadyEvent();
@@ -119,10 +132,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     }
 
     // Best-effort cleanup for optional D3D9 hooks.
-    hklmwrap::RemoveD3D9SurfaceScalerHooks();
+    twinshim::RemoveD3D9SurfaceScalerHooks();
 
     // Best-effort cleanup for optional DirectDraw hooks.
-    hklmwrap::RemoveDDrawSurfaceScalerHooks();
+    twinshim::RemoveDDrawSurfaceScalerHooks();
+
+    // Best-effort cleanup for mouse coordinate mapping hooks.
+    twinshim::RemoveMouseScaleHooks();
 
     HANDLE initThread = g_hookInitThread;
     g_hookInitThread = nullptr;
@@ -131,8 +147,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
       CloseHandle(initThread);
     }
 
-    if (InterlockedCompareExchange(&g_hooksInstalled, 0, 0) == 1 && hklmwrap::AreRegistryHooksActive()) {
-      hklmwrap::RemoveRegistryHooks();
+    if (InterlockedCompareExchange(&g_hooksInstalled, 0, 0) == 1 && twinshim::AreRegistryHooksActive()) {
+      twinshim::RemoveRegistryHooks();
     }
   }
   return TRUE;

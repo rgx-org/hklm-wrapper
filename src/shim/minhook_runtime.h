@@ -2,7 +2,7 @@
 
 #include <stdbool.h>
 
-namespace hklmwrap {
+namespace twinshim {
 
 // Shared MinHook initialization lifetime for the injected shim.
 //

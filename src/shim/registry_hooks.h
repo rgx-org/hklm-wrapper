@@ -2,7 +2,7 @@
 
 #include <windows.h>
 
-namespace hklmwrap {
+namespace twinshim {
 
 bool InstallRegistryHooks();
 bool AreRegistryHooksActive();

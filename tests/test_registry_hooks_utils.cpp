@@ -4,7 +4,7 @@
 
 #include <vector>
 
-using namespace hklmwrap;
+using namespace twinshim;
 
 namespace {
 

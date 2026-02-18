@@ -1,26 +1,34 @@
 // --- Old (non-Ex) APIs and extra operations ---
 
 LONG WINAPI Hook_RegOpenKeyW(HKEY hKey, LPCWSTR lpSubKey, PHKEY phkResult) {
-  TraceApiEvent(L"RegOpenKeyW", L"open_key", KeyPathFromHandle(hKey), L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegOpenKeyW")) {
+    TraceApiEvent(L"RegOpenKeyW", L"open_key", KeyPathFromHandle(hKey), L"-", L"-");
+  }
   InternalDispatchGuard internalGuard;
   return Hook_RegOpenKeyExW(hKey, lpSubKey, 0, KEY_READ, phkResult);
 }
 
 LONG WINAPI Hook_RegOpenKeyA(HKEY hKey, LPCSTR lpSubKey, PHKEY phkResult) {
-  TraceApiEvent(L"RegOpenKeyA", L"open_key", KeyPathFromHandle(hKey), L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegOpenKeyA")) {
+    TraceApiEvent(L"RegOpenKeyA", L"open_key", KeyPathFromHandle(hKey), L"-", L"-");
+  }
   InternalDispatchGuard internalGuard;
   return Hook_RegOpenKeyExA(hKey, lpSubKey, 0, KEY_READ, phkResult);
 }
 
 LONG WINAPI Hook_RegCreateKeyW(HKEY hKey, LPCWSTR lpSubKey, PHKEY phkResult) {
-  TraceApiEvent(L"RegCreateKeyW", L"create_key", KeyPathFromHandle(hKey), L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegCreateKeyW")) {
+    TraceApiEvent(L"RegCreateKeyW", L"create_key", KeyPathFromHandle(hKey), L"-", L"-");
+  }
   InternalDispatchGuard internalGuard;
   DWORD disp = 0;
   return Hook_RegCreateKeyExW(hKey, lpSubKey, 0, nullptr, 0, KEY_READ | KEY_WRITE, nullptr, phkResult, &disp);
 }
 
 LONG WINAPI Hook_RegCreateKeyA(HKEY hKey, LPCSTR lpSubKey, PHKEY phkResult) {
-  TraceApiEvent(L"RegCreateKeyA", L"create_key", KeyPathFromHandle(hKey), L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegCreateKeyA")) {
+    TraceApiEvent(L"RegCreateKeyA", L"create_key", KeyPathFromHandle(hKey), L"-", L"-");
+  }
   InternalDispatchGuard internalGuard;
   DWORD disp = 0;
   return Hook_RegCreateKeyExA(hKey, lpSubKey, 0, nullptr, 0, KEY_READ | KEY_WRITE, nullptr, phkResult, &disp);
@@ -50,11 +58,13 @@ LONG WINAPI Hook_RegSetKeyValueW(HKEY hKey,
   }
   std::wstring sub = subRaw.empty() ? L"" : CanonicalizeSubKey(subRaw);
   std::wstring full = sub.empty() ? base : JoinKeyPath(base, sub);
-  TraceApiEvent(L"RegSetKeyValueW",
-                L"set_value",
-                full,
-                valueName,
-                FormatRegType(dwType) + L":" + FormatValuePreview(dwType, reinterpret_cast<const BYTE*>(lpData), cbData));
+  if (IsRegistryTraceEnabledForApi(L"RegSetKeyValueW")) {
+    TraceApiEvent(L"RegSetKeyValueW",
+                  L"set_value",
+                  full,
+                  valueName,
+                  FormatRegType(dwType) + L":" + FormatValuePreview(dwType, reinterpret_cast<const BYTE*>(lpData), cbData));
+  }
 
   EnsureStoreOpen();
   {
@@ -92,12 +102,14 @@ LONG WINAPI Hook_RegSetKeyValueA(HKEY hKey,
   std::wstring subW = subRaw.empty() ? L"" : CanonicalizeSubKey(subRaw);
   std::wstring full = subW.empty() ? base : JoinKeyPath(base, subW);
   auto normalized = EnsureWideStringData(dwType, reinterpret_cast<const BYTE*>(lpData), cbData);
-  TraceApiEvent(L"RegSetKeyValueA",
-                L"set_value",
-                full,
-                valueName,
-                FormatRegType(dwType) + L":" +
-                    FormatValuePreview(dwType, normalized.empty() ? nullptr : normalized.data(), (DWORD)normalized.size()));
+  if (IsRegistryTraceEnabledForApi(L"RegSetKeyValueA")) {
+    TraceApiEvent(L"RegSetKeyValueA",
+                  L"set_value",
+                  full,
+                  valueName,
+                  FormatRegType(dwType) + L":" +
+                      FormatValuePreview(dwType, normalized.empty() ? nullptr : normalized.data(), (DWORD)normalized.size()));
+  }
   EnsureStoreOpen();
   {
     std::lock_guard<std::mutex> lock(g_storeMutex);
@@ -122,7 +134,9 @@ LONG WINAPI Hook_RegEnumValueW(HKEY hKey,
     return fpRegEnumValueW(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, lpType, lpData, lpcbData);
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
-  TraceApiEvent(L"RegEnumValueW", L"enum_value", keyPath, L"index", std::to_wstring(dwIndex));
+  if (IsRegistryTraceEnabledForApi(L"RegEnumValueW")) {
+    TraceApiEvent(L"RegEnumValueW", L"enum_value", keyPath, L"index", std::to_wstring(dwIndex));
+  }
   if (keyPath.empty()) {
     DWORD typeLocal = 0;
     LPDWORD typeOut = lpType ? lpType : &typeLocal;
@@ -226,7 +240,9 @@ LONG WINAPI Hook_RegEnumValueA(HKEY hKey,
     return fpRegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, lpType, lpData, lpcbData);
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
-  TraceApiEvent(L"RegEnumValueA", L"enum_value", keyPath, L"index", std::to_wstring(dwIndex));
+  if (IsRegistryTraceEnabledForApi(L"RegEnumValueA")) {
+    TraceApiEvent(L"RegEnumValueA", L"enum_value", keyPath, L"index", std::to_wstring(dwIndex));
+  }
   if (keyPath.empty()) {
     DWORD typeLocal = 0;
     LPDWORD typeOut = lpType ? lpType : &typeLocal;
@@ -337,7 +353,9 @@ LONG WINAPI Hook_RegEnumKeyExW(HKEY hKey,
     return fpRegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
-  TraceApiEvent(L"RegEnumKeyExW", L"enum_key", keyPath, L"index", std::to_wstring(dwIndex));
+  if (IsRegistryTraceEnabledForApi(L"RegEnumKeyExW")) {
+    TraceApiEvent(L"RegEnumKeyExW", L"enum_key", keyPath, L"index", std::to_wstring(dwIndex));
+  }
   if (keyPath.empty()) {
     BypassGuard guard;
     return fpRegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
@@ -388,7 +406,9 @@ LONG WINAPI Hook_RegEnumKeyExA(HKEY hKey,
     return fpRegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
-  TraceApiEvent(L"RegEnumKeyExA", L"enum_key", keyPath, L"index", std::to_wstring(dwIndex));
+  if (IsRegistryTraceEnabledForApi(L"RegEnumKeyExA")) {
+    TraceApiEvent(L"RegEnumKeyExA", L"enum_key", keyPath, L"index", std::to_wstring(dwIndex));
+  }
   if (keyPath.empty()) {
     BypassGuard guard;
     return fpRegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
@@ -431,14 +451,18 @@ LONG WINAPI Hook_RegEnumKeyExA(HKEY hKey,
 }
 
 LONG WINAPI Hook_RegEnumKeyW(HKEY hKey, DWORD dwIndex, LPWSTR lpName, DWORD cchName) {
-  TraceApiEvent(L"RegEnumKeyW", L"enum_key", KeyPathFromHandle(hKey), L"index", std::to_wstring(dwIndex));
+  if (IsRegistryTraceEnabledForApi(L"RegEnumKeyW")) {
+    TraceApiEvent(L"RegEnumKeyW", L"enum_key", KeyPathFromHandle(hKey), L"index", std::to_wstring(dwIndex));
+  }
   InternalDispatchGuard internalGuard;
   DWORD len = cchName;
   return Hook_RegEnumKeyExW(hKey, dwIndex, lpName, &len, nullptr, nullptr, nullptr, nullptr);
 }
 
 LONG WINAPI Hook_RegEnumKeyA(HKEY hKey, DWORD dwIndex, LPSTR lpName, DWORD cchName) {
-  TraceApiEvent(L"RegEnumKeyA", L"enum_key", KeyPathFromHandle(hKey), L"index", std::to_wstring(dwIndex));
+  if (IsRegistryTraceEnabledForApi(L"RegEnumKeyA")) {
+    TraceApiEvent(L"RegEnumKeyA", L"enum_key", KeyPathFromHandle(hKey), L"index", std::to_wstring(dwIndex));
+  }
   InternalDispatchGuard internalGuard;
   DWORD len = cchName;
   return Hook_RegEnumKeyExA(hKey, dwIndex, lpName, &len, nullptr, nullptr, nullptr, nullptr);
@@ -471,7 +495,9 @@ LONG WINAPI Hook_RegQueryInfoKeyW(HKEY hKey,
                               lpftLastWriteTime);
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
-  TraceApiEvent(L"RegQueryInfoKeyW", L"query_info", keyPath, L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegQueryInfoKeyW")) {
+    TraceApiEvent(L"RegQueryInfoKeyW", L"query_info", keyPath, L"-", L"-");
+  }
   if (keyPath.empty()) {
     BypassGuard guard;
     return fpRegQueryInfoKeyW(hKey,
@@ -571,7 +597,9 @@ LONG WINAPI Hook_RegQueryInfoKeyA(HKEY hKey,
                               lpftLastWriteTime);
   }
   std::wstring keyPath = KeyPathFromHandle(hKey);
-  TraceApiEvent(L"RegQueryInfoKeyA", L"query_info", keyPath, L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegQueryInfoKeyA")) {
+    TraceApiEvent(L"RegQueryInfoKeyA", L"query_info", keyPath, L"-", L"-");
+  }
   if (keyPath.empty()) {
     BypassGuard guard;
     return fpRegQueryInfoKeyA(hKey,
@@ -617,11 +645,13 @@ LONG WINAPI Hook_RegSetValueW(HKEY hKey, LPCWSTR lpSubKey, DWORD dwType, LPCWSTR
   }
   std::wstring sub = subRaw.empty() ? L"" : CanonicalizeSubKey(subRaw);
   std::wstring full = sub.empty() ? base : JoinKeyPath(base, sub);
-  TraceApiEvent(L"RegSetValueW",
-                L"set_value",
-                full,
-                L"(Default)",
-                FormatRegType(dwType) + L":" + FormatValuePreview(dwType, reinterpret_cast<const BYTE*>(lpData), cbData));
+  if (IsRegistryTraceEnabledForApi(L"RegSetValueW")) {
+    TraceApiEvent(L"RegSetValueW",
+                  L"set_value",
+                  full,
+                  L"(Default)",
+                  FormatRegType(dwType) + L":" + FormatValuePreview(dwType, reinterpret_cast<const BYTE*>(lpData), cbData));
+  }
   std::wstring valueName;
 
   EnsureStoreOpen();
@@ -651,12 +681,14 @@ LONG WINAPI Hook_RegSetValueA(HKEY hKey, LPCSTR lpSubKey, DWORD dwType, LPCSTR l
   std::wstring subW = subRaw.empty() ? L"" : CanonicalizeSubKey(subRaw);
   std::wstring full = subW.empty() ? base : JoinKeyPath(base, subW);
   auto normalized = EnsureWideStringData(dwType, reinterpret_cast<const BYTE*>(lpData), cbData);
-  TraceApiEvent(L"RegSetValueA",
-                L"set_value",
-                full,
-                L"(Default)",
-                FormatRegType(dwType) + L":" +
-                    FormatValuePreview(dwType, normalized.empty() ? nullptr : normalized.data(), (DWORD)normalized.size()));
+  if (IsRegistryTraceEnabledForApi(L"RegSetValueA")) {
+    TraceApiEvent(L"RegSetValueA",
+                  L"set_value",
+                  full,
+                  L"(Default)",
+                  FormatRegType(dwType) + L":" +
+                      FormatValuePreview(dwType, normalized.empty() ? nullptr : normalized.data(), (DWORD)normalized.size()));
+  }
   std::wstring valueName;
 
   EnsureStoreOpen();

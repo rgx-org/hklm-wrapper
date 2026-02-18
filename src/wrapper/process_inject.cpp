@@ -2,7 +2,7 @@
 
 #include <windows.h>
 
-namespace hklmwrap {
+namespace twinshim {
 
 bool InjectDllIntoProcess(HANDLE processHandle, const std::wstring& dllPath) {
   if (!processHandle || dllPath.empty()) {

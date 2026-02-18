@@ -121,12 +121,23 @@ else()
 
   add_library(hklm_shim SHARED
     src/shim/dllmain.cpp
+    src/shim/mouse_scale_hooks.cpp
+    src/shim/mouse_scale_hooks.h
     src/shim/d3d9_surface_scaler.cpp
     src/shim/d3d9_surface_scaler.h
+    src/shim/d3d9_surface_scaler_state.inl
+    src/shim/d3d9_surface_scaler_hooks.inl
+    src/shim/d3d9_surface_scaler_public.inl
     src/shim/ddraw_surface_scaler.cpp
     src/shim/ddraw_surface_scaler.h
+    src/shim/ddraw_surface_scaler_utils.inl
+    src/shim/ddraw_surface_scaler_scaler.inl
+    src/shim/ddraw_surface_scaler_hooks.inl
+    src/shim/ddraw_surface_scaler_public.inl
     src/shim/surface_scale_config.cpp
     src/shim/surface_scale_config.h
+    src/shim/window_scale_registry.cpp
+    src/shim/window_scale_registry.h
     src/shim/minhook_runtime.cpp
     src/shim/minhook_runtime.h
     src/shim/registry_hooks.cpp
@@ -172,6 +183,13 @@ else()
 
     add_library(hklm_dgvoodoo_addon SHARED
       src/dgvoodoo_addon/addon_main.cpp
+      src/dgvoodoo_addon/addon_util.inl
+      src/dgvoodoo_addon/addon_types.inl
+      src/dgvoodoo_addon/d3d12_observer_public.inl
+      src/dgvoodoo_addon/d3d12_observer_private_methods.inl
+      src/dgvoodoo_addon/d3d12_observer_private_state.inl
+      src/dgvoodoo_addon/addon_namespace_tail.inl
+      src/dgvoodoo_addon/addon_exports.inl
       src/shim/surface_scale_config.cpp
       src/shim/surface_scale_config.h
     )

@@ -4,7 +4,7 @@
 #  include <windows.h>
 #endif
 
-namespace hklmwrap {
+namespace twinshim {
 
 std::wstring GetModulePath() {
 #ifdef _WIN32

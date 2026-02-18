@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <system_error>
 
-namespace hklmwrap::testutil {
+namespace twinshim::testutil {
 
 inline std::filesystem::path GetConfiguredTempBaseDir() {
   if (const char* env = std::getenv("TWINSHIM_TEST_TMP_BASE"); env && *env) {
@@ -52,4 +52,4 @@ inline std::filesystem::path GetTestTempDir(const char* subdir) {
   return {};
 }
 
-} // namespace hklmwrap::testutil
+} // namespace twinshim::testutil

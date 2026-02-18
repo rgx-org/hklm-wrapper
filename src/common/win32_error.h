@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace hklmwrap {
+namespace twinshim {
 
 std::wstring FormatWin32Error(unsigned long error);
 

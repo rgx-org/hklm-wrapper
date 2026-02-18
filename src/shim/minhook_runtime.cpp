@@ -4,7 +4,7 @@
 
 #include <mutex>
 
-namespace hklmwrap {
+namespace twinshim {
 namespace {
 
 std::mutex g_mhMutex;

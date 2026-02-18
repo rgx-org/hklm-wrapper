@@ -1,6 +1,6 @@
 #pragma once
 
-namespace hklmwrap {
+namespace twinshim {
 
 // DirectDraw-based implementation of surface scaling (system ddraw.dll paths).
 //

@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace hklmwrap {
+namespace twinshim {
 
 std::wstring GetModulePath();
 std::wstring GetDirectoryName(const std::wstring& path);

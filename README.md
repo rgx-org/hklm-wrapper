@@ -20,9 +20,7 @@ Use the workspace file that matches your task:
 - `TwinShim-native.code-workspace`
   - macOS/Linux native development and fast unit-test iteration.
 - `TwinShim-windows-mingw.code-workspace`
-  - Win32-target IntelliSense/cross-build on macOS/Linux.
-
-In VS Code: **File → Open Workspace from File...**
+  - Win32-target IntelliSense/cross-build on macOS/Linux. Cross-build doesn't build dgvoodoo features.
 
 Practical flow:
 1. Work mostly in the native workspace.
@@ -110,8 +108,6 @@ One-shot helper:
 scripts\test-windows-msvc-x86.cmd
 ```
 
-By default, tests write temporary DBs and workflow runtime artifacts under the build tree (for example
-`build\\native-tests-windows\\test-tmp\\twinshim-tests\\...`) instead of `%TEMP%`.
 Override the base directory by setting `TWINSHIM_TEST_TMP_BASE` (or the legacy `HKLM_WRAPPER_TEST_TMP_BASE`).
 
 This suite includes a Windows-only workflow test that launches `twinshim_cli.exe --debug all` around a probe process and verifies both hook debug trace output and persisted SQLite-backed registry data.
@@ -119,8 +115,8 @@ This suite includes a Windows-only workflow test that launches `twinshim_cli.exe
 ## Run
 
 ```text
-twinshim.exe [--db <path>] [--debug <api-list|all>] [--scale <1.1-100>] [--scale-method <point|bilinear|bicubic>] <target_exe> [target args...]
-twinshim_cli.exe [--db <path>] [--debug <api-list|all>] [--scale <1.1-100>] [--scale-method <point|bilinear|bicubic>] <target_exe> [target args...]
+Usage:
+  twinshim_cli.exe [--db <path>] [--debug <api1,api2,...|all>] [--scale <1.1-100>] [--scale-method <point|bilinear|bicubic|cr|catmull-rom|lanczos|lanczos3>] <target_exe> [target arguments...]
 ```
 
 Use `twinshim.exe` for normal GUI-driven launches.
@@ -142,7 +138,12 @@ This repo has two scaling approaches:
 - **Shim hooks (default)**: best-effort surface scaling for *native* D3D9 and system DirectDraw paths.
 - **dgVoodoo AddOn (recommended for dgVoodoo)**: intended path when running under dgVoodoo, where the wrapper may render through non-D3D9 backends (e.g. D3D12) and backbuffer/swapchain hooking is fragile.
 
-As of Feb 2026, the previous DXGI/D3D11 "post-filter" hook that attempted to improve dgVoodoo wrapper output has been removed. If the injected shim detects an app-local/wrapper `ddraw.dll` or dgVoodoo modules, it will intentionally **disable shim scaling** for that path and log a one-time message.
+When `--scale` is active, the injected shim also installs a small mouse-coordinate mapping layer so that client-space mouse positions and mouse messages are translated back into the app's *pre-scale* coordinate space. This avoids the common "cursor moves too fast / hits the edge early" symptom when the window is physically resized but the game still clamps input to its native render size.
+
+Debugging:
+
+- Set `TWINSHIM_MOUSE_DEBUG=1` (or legacy `HKLM_WRAPPER_MOUSE_DEBUG=1`) to emit limited trace output about scale mapping registration and coordinate transforms.
+- The shim remaps `GetCursorPos` while the cursor is inside the scaled window client area (common for games that poll cursor position instead of using `WM_MOUSEMOVE`).
 
 ### Building the dgVoodoo AddOn DLL
 
@@ -150,7 +151,8 @@ As of Feb 2026, the previous DXGI/D3D11 "post-filter" hook that attempted to imp
   - `third_party/dgvoodoo_addon_sdk/`
   (expected layout includes `Inc/Addon` and `Lib/x86`)
 2. Configure with:
-  - `-DHKLM_WRAPPER_ENABLE_DGVOODOO_ADDON=ON`
+  - `-DHKLM_WRAPPER_ENABLE_DGVOODOO_ADDON=ON`  
+  (automatically done if using build script.)
 
 If your SDK is in a different location or you need a different arch library path, set:
 
@@ -300,8 +302,8 @@ WHERE key_path='HKLM\\Software\\MyApp'
 - Optional windowed scaling (Direct3D9 and some DirectDraw paths) is controlled by target command-line options:
   - `--scale <1.1-100>`: scaling factor (e.g. `--scale 2` for 2x)
   - `--scale-method <point|bilinear|bicubic>`: sampling method (default: `point`)
-  - Use `twinshim_cli.exe --debug all ...` to see `[shim:d3d9]` / `[shim:ddraw]` probe output.
-- macOS/Linux cross-build validates compile/link only; runtime injection/hooking must be validated natively on Windows.
+  - Use `twinshim_cli.exe --debug (-|all) ...` to see `[shim:d3d9]` / `[shim:ddraw]` probe output.
+- macOS/Linux cross-build validates compile/link only for non-dgVoodoo functionality; runtime injection/hooking must be validated natively on Windows.
 - Hooks a small set of APIs (both `*W` and `*A` where applicable):
   - Open/create keys: `RegOpenKey(Ex)`, `RegCreateKey(Ex)`
   - Close key handles: `RegCloseKey`

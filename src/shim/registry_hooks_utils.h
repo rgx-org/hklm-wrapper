@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace hklmwrap {
+namespace twinshim {
 
 std::wstring CanonicalizeSubKey(const std::wstring& s);
 std::wstring JoinKeyPath(const std::wstring& base, const std::wstring& sub);

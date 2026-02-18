@@ -26,7 +26,7 @@ constexpr uint32_t REG_QWORD = 11;
 #endif
 #endif
 
-namespace hklmwrap::regfile {
+namespace twinshim::regfile {
 
 static std::wstring Trim(const std::wstring& s) {
   size_t a = 0;
@@ -379,4 +379,4 @@ bool ImportRegText(LocalRegistryStore& store, const std::wstring& text) {
   return true;
 }
 
-} // namespace hklmwrap::regfile
+} // namespace twinshim::regfile

@@ -7,7 +7,7 @@
 
 struct sqlite3;
 
-namespace hklmwrap {
+namespace twinshim {
 
 struct StoredValue {
   bool isDeleted = false;

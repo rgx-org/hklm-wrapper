@@ -18,7 +18,7 @@
 #include <sstream>
 #include <atomic>
 
-using namespace hklmwrap;
+using namespace twinshim;
 
 namespace {
 
@@ -59,16 +59,33 @@ static void ShowInfo(const std::wstring& message) {
 #endif
 }
 
-static void TraceLine(const std::wstring& message, bool enabled) {
+static void TraceLine(const wchar_t* message, bool enabled) {
 #if defined(HKLM_WRAPPER_CONSOLE_APP)
   if (!enabled) {
     return;
   }
-  fwprintf(stdout, L"[TwinShim] %ls\n", message.c_str());
+  fwprintf(stdout, L"[TwinShim] %ls\n", message ? message : L"");
   fflush(stdout);
 #else
   (void)message;
   (void)enabled;
+#endif
+}
+
+static void TraceLine(const std::wstring& message, bool enabled) {
+  TraceLine(message.c_str(), enabled);
+}
+
+template <typename Fn>
+static void TraceLineLazy(bool enabled, Fn&& makeMessage) {
+#if defined(HKLM_WRAPPER_CONSOLE_APP)
+  if (!enabled) {
+    return;
+  }
+  TraceLine(makeMessage().c_str(), true);
+#else
+  (void)enabled;
+  (void)makeMessage;
 #endif
 }
 
@@ -594,7 +611,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
       ShowError(msg);
       return 5;
     }
-    TraceLine(L"debug pipe created: " + debugBridge.pipeName, traceEnabled);
+    TraceLineLazy(traceEnabled, [&] { return L"debug pipe created: " + debugBridge.pipeName; });
     SetEnvVarCompat(L"TWINSHIM_DEBUG_APIS", L"HKLM_WRAPPER_DEBUG_APIS", debugApisCsv.c_str());
     SetEnvVarCompat(L"TWINSHIM_DEBUG_PIPE", L"HKLM_WRAPPER_DEBUG_PIPE", debugBridge.pipeName.c_str());
   }
@@ -608,9 +625,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   std::wstring mutableCmd = cmdLine;
   std::wstring workDir = DefaultWorkingDirForTarget(targetExe);
 
-  TraceLine(L"launching target: " + targetExe, traceEnabled);
+  TraceLineLazy(traceEnabled, [&] { return L"launching target: " + targetExe; });
   if (!workDir.empty()) {
-    TraceLine(L"working directory: " + workDir, traceEnabled);
+    TraceLineLazy(traceEnabled, [&] { return L"working directory: " + workDir; });
   }
 
 #if HKLM_WRAPPER_IGNORE_EMBEDDED_MANIFEST
@@ -652,7 +669,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     return 6;
   }
 
-  TraceLine(L"injecting shim: " + shimPath, traceEnabled);
+  TraceLineLazy(traceEnabled, [&] { return L"injecting shim: " + shimPath; });
 
   if (!InjectDllIntoProcess(pi.hProcess, shimPath)) {
     DWORD injectErr = GetLastError();
@@ -674,7 +691,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     } else if (waitRc == WAIT_TIMEOUT) {
       TraceLine(L"timed out waiting for shim hook-ready signal", traceEnabled);
     } else {
-      TraceLine(L"failed waiting for shim hook-ready signal: " + FormatWin32Error(GetLastError()), traceEnabled);
+      TraceLineLazy(traceEnabled, [&] { return L"failed waiting for shim hook-ready signal: " + FormatWin32Error(GetLastError()); });
     }
   }
 
@@ -712,10 +729,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   DWORD exitCode = 0;
   GetExitCodeProcess(pi.hProcess, &exitCode);
 
-  std::wstringstream exitMsg;
-  exitMsg << L"wrapper returning exit code " << static_cast<unsigned long>(exitCode)
-          << L" (0x" << std::hex << std::uppercase << static_cast<unsigned long>(exitCode) << L")";
-  TraceLine(exitMsg.str(), traceEnabled);
+    TraceLineLazy(traceEnabled, [&] {
+      std::wstringstream exitMsg;
+      exitMsg << L"wrapper returning exit code " << static_cast<unsigned long>(exitCode)
+        << L" (0x" << std::hex << std::uppercase << static_cast<unsigned long>(exitCode) << L")";
+      return exitMsg.str();
+    });
   CloseHandle(pi.hProcess);
   if (hookReadyEvent) {
     CloseHandle(hookReadyEvent);

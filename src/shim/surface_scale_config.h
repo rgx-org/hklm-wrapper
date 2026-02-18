@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace hklmwrap {
+namespace twinshim {
 
 enum class SurfaceScaleMethod {
   kPoint = 0,

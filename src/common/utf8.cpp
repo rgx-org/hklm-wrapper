@@ -7,7 +7,7 @@
 #  include <locale>
 #endif
 
-namespace hklmwrap {
+namespace twinshim {
 
 std::string WideToUtf8(const std::wstring& s) {
   if (s.empty()) {

@@ -19,12 +19,12 @@
 #include <io.h>
 #endif
 
-using namespace hklmwrap;
+using namespace twinshim;
 
-using hklmwrap::regfile::BuildRegExportContent;
-using hklmwrap::regfile::CanonKey;
-using hklmwrap::regfile::ParseData;
-using hklmwrap::regfile::ParseType;
+using twinshim::regfile::BuildRegExportContent;
+using twinshim::regfile::CanonKey;
+using twinshim::regfile::ParseData;
+using twinshim::regfile::ParseType;
 
 static void PrintUsage() {
   std::wcerr << L"hklmreg [--db <path>] <add|delete|export|import|dump> [options]\n"
@@ -254,7 +254,7 @@ int wmain(int argc, wchar_t** argv) {
       return 1;
     }
 
-    if (!hklmwrap::regfile::ImportRegText(store, text)) {
+    if (!twinshim::regfile::ImportRegText(store, text)) {
       std::wcerr << L"Import failed\n";
       return 1;
     }

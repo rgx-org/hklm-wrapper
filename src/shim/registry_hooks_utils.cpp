@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace hklmwrap {
+namespace twinshim {
 
 std::wstring CanonicalizeSubKey(const std::wstring& s) {
   std::wstring out = s;

@@ -2,7 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-using namespace hklmwrap;
+using namespace twinshim;
 
 TEST_CASE("UTF-8 round trip works for ASCII and Unicode", "[utf8]") {
   const std::wstring text = L"Hello \u4E16\u754C \u2713";

@@ -10,7 +10,7 @@
 #include <map>
 #include <set>
 
-namespace hklmwrap {
+namespace twinshim {
 
 static int64_t NowUnixSeconds() {
   // Good enough for change ordering; doesn't need to be monotonic.

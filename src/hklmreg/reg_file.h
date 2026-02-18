@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace hklmwrap::regfile {
+namespace twinshim::regfile {
 
 std::wstring CanonKey(const std::wstring& in);
 
@@ -20,4 +20,4 @@ std::wstring BuildRegExportContent(const std::vector<LocalRegistryStore::ExportR
 // Returns false on DB failures; tolerates unknown/unsupported lines.
 bool ImportRegText(LocalRegistryStore& store, const std::wstring& text);
 
-} // namespace hklmwrap::regfile
+} // namespace twinshim::regfile

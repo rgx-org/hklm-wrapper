@@ -6,7 +6,7 @@
 #include <cwctype>
 #include <mutex>
 
-namespace hklmwrap {
+namespace twinshim {
 namespace {
 
 static std::wstring ToLowerCopy(const std::wstring& s) {

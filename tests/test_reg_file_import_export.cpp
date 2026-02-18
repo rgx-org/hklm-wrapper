@@ -7,7 +7,7 @@
 #include <filesystem>
 #include <string>
 
-using namespace hklmwrap;
+using namespace twinshim;
 
 namespace {
 

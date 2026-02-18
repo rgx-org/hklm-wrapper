@@ -21,7 +21,7 @@
 #include <cwctype>
 #include <unordered_map>
 
-namespace hklmwrap {
+namespace twinshim {
 
 namespace {
 

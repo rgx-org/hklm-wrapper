@@ -1,6 +1,6 @@
 #pragma once
 
-namespace hklmwrap {
+namespace twinshim {
 
 // Enables surface scaling for Direct3D9 apps in windowed mode.
 //

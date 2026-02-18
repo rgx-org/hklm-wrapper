@@ -2,7 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-using namespace hklmwrap;
+using namespace twinshim;
 
 TEST_CASE("NormalizeSlashes converts forward slashes", "[path]") {
   CHECK(NormalizeSlashes(L"A/B/C") == L"A\\B\\C");

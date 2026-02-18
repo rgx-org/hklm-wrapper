@@ -7,7 +7,7 @@
 #include <mutex>
 #include <vector>
 
-namespace hklmwrap {
+namespace twinshim {
 namespace {
 
 constexpr DWORD kMaxTraceDataBytes = 1024;
@@ -329,6 +329,13 @@ std::wstring FormatValuePreview(DWORD type, const BYTE* data, DWORD cbData) {
   return L"hex:" + HexPreview(data, cbData);
 }
 
+bool IsRegistryTraceEnabledForApi(const wchar_t* apiName) {
+  if (g_internalDispatchDepth > 0) {
+    return false;
+  }
+  return ShouldTraceApi(apiName);
+}
+
 std::wstring FormatValueForTrace(bool typeKnown, DWORD type, const BYTE* data, DWORD cbData, bool ansiStrings) {
   if (!data || cbData == 0) {
     return L"<empty>";
@@ -481,6 +488,9 @@ LONG TraceReadResultAndReturn(const wchar_t* apiName,
                               const BYTE* data,
                               DWORD cbData,
                               bool sizeOnly) {
+  if (g_internalDispatchDepth > 0 || !ShouldTraceApi(apiName)) {
+    return status;
+  }
   std::wstring value = L"rc=" + std::to_wstring((unsigned long)status);
   if (typeKnown) {
     value += L" type=" + FormatRegType(type);
@@ -515,6 +525,9 @@ LONG TraceEnumReadResultAndReturn(const wchar_t* apiName,
                                   const BYTE* data,
                                   DWORD cbData,
                                   bool sizeOnly) {
+  if (g_internalDispatchDepth > 0 || !ShouldTraceApi(apiName)) {
+    return status;
+  }
   std::wstring detail = L"idx=" + std::to_wstring((unsigned long)index) +
                         L" rc=" + std::to_wstring((unsigned long)status);
   if (typeKnown) {

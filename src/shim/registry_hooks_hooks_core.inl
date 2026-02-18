@@ -24,7 +24,9 @@ LONG WINAPI Hook_RegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions, REG
     return fpRegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
   }
   std::wstring full = base.empty() ? (sub.empty() ? L"(native)" : sub) : (sub.empty() ? base : JoinKeyPath(base, sub));
-  TraceApiEvent(L"RegOpenKeyExW", L"open_key", full, L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegOpenKeyExW")) {
+    TraceApiEvent(L"RegOpenKeyExW", L"open_key", full, L"-", L"-");
+  }
 
   EnsureStoreOpen();
   {
@@ -107,7 +109,9 @@ LONG WINAPI Hook_RegCreateKeyExW(HKEY hKey,
         hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
   }
   std::wstring full = base.empty() ? (sub.empty() ? L"(native)" : sub) : (sub.empty() ? base : JoinKeyPath(base, sub));
-  TraceApiEvent(L"RegCreateKeyExW", L"create_key", full, L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegCreateKeyExW")) {
+    TraceApiEvent(L"RegCreateKeyExW", L"create_key", full, L"-", L"-");
+  }
 
   EnsureStoreOpen();
   {
@@ -152,7 +156,9 @@ LONG WINAPI Hook_RegCloseKey(HKEY hKey) {
   if (g_bypass) {
     return fpRegCloseKey(hKey);
   }
-  TraceApiEvent(L"RegCloseKey", L"close_key", KeyPathFromHandle(hKey), L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegCloseKey")) {
+    TraceApiEvent(L"RegCloseKey", L"close_key", KeyPathFromHandle(hKey), L"-", L"-");
+  }
   if (auto* vk = AsVirtual(hKey)) {
     if (vk->real) {
       BypassGuard guard;
@@ -185,11 +191,13 @@ LONG WINAPI Hook_RegSetValueExW(HKEY hKey,
   if (!TryReadWideString(lpValueName, valueName)) {
     return ERROR_INVALID_PARAMETER;
   }
-  TraceApiEvent(L"RegSetValueExW",
-                L"set_value",
-                keyPath,
-                valueName,
-                FormatRegType(dwType) + L":" + FormatValuePreview(dwType, lpData, cbData));
+  if (IsRegistryTraceEnabledForApi(L"RegSetValueExW")) {
+    TraceApiEvent(L"RegSetValueExW",
+                  L"set_value",
+                  keyPath,
+                  valueName,
+                  FormatRegType(dwType) + L":" + FormatValuePreview(dwType, lpData, cbData));
+  }
 
   EnsureStoreOpen();
   {
@@ -361,7 +369,9 @@ LSTATUS WINAPI Hook_RegGetValueW(HKEY hKey,
   if (!TryReadWideString(lpValue, valueName)) {
     return ERROR_INVALID_PARAMETER;
   }
-  TraceApiEvent(L"RegGetValueW", L"query_value", full, valueName.empty() ? L"(Default)" : valueName, L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegGetValueW")) {
+    TraceApiEvent(L"RegGetValueW", L"query_value", full, valueName.empty() ? L"(Default)" : valueName, L"-");
+  }
 
   EnsureStoreOpen();
   {
@@ -447,7 +457,9 @@ LONG WINAPI Hook_RegDeleteValueW(HKEY hKey, LPCWSTR lpValueName) {
   if (!TryReadWideString(lpValueName, valueName)) {
     return ERROR_INVALID_PARAMETER;
   }
-  TraceApiEvent(L"RegDeleteValueW", L"delete_value", keyPath, valueName, L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegDeleteValueW")) {
+    TraceApiEvent(L"RegDeleteValueW", L"delete_value", keyPath, valueName, L"-");
+  }
 
   EnsureStoreOpen();
   {
@@ -474,7 +486,9 @@ LONG WINAPI Hook_RegDeleteKeyW(HKEY hKey, LPCWSTR lpSubKey) {
   }
   std::wstring sub = subRaw.empty() ? L"" : CanonicalizeSubKey(subRaw);
   std::wstring full = sub.empty() ? base : JoinKeyPath(base, sub);
-  TraceApiEvent(L"RegDeleteKeyW", L"delete_key", full, L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegDeleteKeyW")) {
+    TraceApiEvent(L"RegDeleteKeyW", L"delete_key", full, L"-", L"-");
+  }
   if (sub.empty()) {
     return ERROR_INVALID_PARAMETER;
   }
@@ -500,7 +514,9 @@ LONG WINAPI Hook_RegDeleteKeyExW(HKEY hKey, LPCWSTR lpSubKey, REGSAM samDesired,
     std::wstring sub = subRaw.empty() ? L"" : CanonicalizeSubKey(subRaw);
     full = sub.empty() ? base : JoinKeyPath(base, sub);
   }
-  TraceApiEvent(L"RegDeleteKeyExW", L"delete_key", full, L"-", L"-");
+  if (IsRegistryTraceEnabledForApi(L"RegDeleteKeyExW")) {
+    TraceApiEvent(L"RegDeleteKeyExW", L"delete_key", full, L"-", L"-");
+  }
   (void)samDesired;
   (void)Reserved;
   InternalDispatchGuard internalGuard;

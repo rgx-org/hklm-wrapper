@@ -1,6 +1,6 @@
 #include "common/arg_quote.h"
 
-namespace hklmwrap {
+namespace twinshim {
 
 // Matches CreateProcess command-line parsing rules.
 std::wstring QuoteWindowsCommandLineArg(const std::wstring& arg) {
